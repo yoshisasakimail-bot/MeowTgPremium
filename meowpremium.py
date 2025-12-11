@@ -85,6 +85,16 @@ def get_config_data() -> dict:
         return {}
 
 
+def get_payment_keyboard() -> InlineKeyboardMarkup:
+    """Returns the Kpay/Wave selection keyboard."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💸 Kpay (KBZ Pay)", callback_data='pay_kpay'),
+            InlineKeyboardButton("💸 Wave Money", callback_data='pay_wave')
+        ]
+    ])
+
+
 def get_product_keyboard(product_type: str) -> InlineKeyboardMarkup:
     """Dynamically generates the product price keyboard based on product type (star/premium)."""
     config = get_config_data()
@@ -186,15 +196,11 @@ async def handle_user_account(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles Payment Method button press and initial payment options."""
     
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💸 Kpay (KBZ Pay)", callback_data='pay_kpay'),
-            InlineKeyboardButton("💸 Wave Money", callback_data='pay_wave')
-        ]
-    ])
+    keyboard = get_payment_keyboard()
     
     if update.callback_query:
-        await update.callback_query.edit_message_text(
+        # Callback query ကလာရင် Message အသစ်ပို့ပြီး State ကို Reset လုပ်ခြင်း
+        await update.callback_query.message.reply_text(
             "💰 Select a method for coin purchase:",
             reply_markup=keyboard
         )
@@ -249,7 +255,8 @@ async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"**Please send the receipt (Screenshot) after the transfer.**"
     )
     
-    await query.edit_message_text(transfer_text, reply_markup=back_keyboard, parse_mode='Markdown')
+    # Message Edit အစား reply_text ကိုပဲ သုံးပါမယ် (Conversation Stability အတွက်)
+    await query.message.reply_text(transfer_text, reply_markup=back_keyboard, parse_mode='Markdown')
     return WAITING_FOR_RECEIPT
 
 
@@ -259,7 +266,7 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(
         "💌 Receipt sent to Admin. Please wait for coin deposit confirmation."
     )
-    return ConversationHandler.END # 👈 Conversation ပြီးဆုံးခြင်း
+    return ConversationHandler.END # Conversation ပြီးဆုံးခြင်း
 
 
 async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -267,9 +274,13 @@ async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    # handle_payment_method ကို ပြန်ခေါ်ပြီး CHOOSING_PAYMENT_METHOD State ကို ပြန်ပို့ခြင်း
-    await handle_payment_method(query, context)
-    return CHOOSING_PAYMENT_METHOD # 👈 State ကို မှန်ကန်စွာ ပြန်ပို့ခြင်း
+    # Message အသစ်ပို့ပြီး Payment Menu ကို ပြန်ပြခြင်း
+    await query.message.reply_text(
+        "💰 Select a method for coin purchase:",
+        reply_markup=get_payment_keyboard()
+    )
+    
+    return CHOOSING_PAYMENT_METHOD
 
 
 # ----------------- F. Product Purchase Conversation Handlers -----------------
@@ -315,7 +326,7 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
     if user_input and user_input.isdigit() and len(user_input) >= 8:
         context.user_data['premium_phone'] = user_input
         await update.message.reply_text(
-            f"Thank you. Now, please send the **Telegram Username** associated with the phone number {user_input}."
+            f"Thank thank you. Now, please send the **Telegram Username** associated with the phone number {user_input}."
         )
         return WAITING_FOR_USERNAME
     else:
@@ -450,7 +461,10 @@ def main() -> None:
                 CallbackQueryHandler(back_to_payment_menu, pattern='^payment_back') 
             ],
         },
-        fallbacks=[]
+        # 🚨 Conversation ရောထွေးမှုမရှိစေရန် Fallback ထည့်သွင်းခြင်း
+        fallbacks=[
+            MessageHandler(filters.Text("💰 Payment Method"), handle_payment_method) 
+        ]
     )
     application.add_handler(payment_conv_handler)
     
