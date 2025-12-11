@@ -121,7 +121,6 @@ def register_user_if_not_exists(user_id: int, username: str):
         if cell is None:
             today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             new_row = [str(user_id), username if username else 'N/A', 0, today]
-            # Assuming headers are: user_id, username, coin_balance, registration_date
             WS_USER_DATA.append_row(new_row, value_input_option='USER_ENTERED')
             logging.info(f"✅ New user registered: {user_id}")
             
@@ -161,7 +160,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Handles /start command and registers user if not exists."""
     user = update.effective_user
     
-    # User Registration Logic
     register_user_if_not_exists(user.id, user.full_name) 
 
     welcome_text = (
@@ -261,7 +259,7 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(
         "💌 Receipt sent to Admin. Please wait for coin deposit confirmation."
     )
-    return ConversationHandler.END
+    return ConversationHandler.END # 👈 Conversation ပြီးဆုံးခြင်း
 
 
 async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -269,7 +267,9 @@ async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    return await handle_payment_method(query, context)
+    # handle_payment_method ကို ပြန်ခေါ်ပြီး CHOOSING_PAYMENT_METHOD State ကို ပြန်ပို့ခြင်း
+    await handle_payment_method(query, context)
+    return CHOOSING_PAYMENT_METHOD # 👈 State ကို မှန်ကန်စွာ ပြန်ပို့ခြင်း
 
 
 # ----------------- F. Product Purchase Conversation Handlers -----------------
@@ -344,8 +344,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Error: Product price in the sheet is not a valid number.")
         return ConversationHandler.END
 
-    # Coin Balance ကို Google Sheet မှ ဆွဲယူရမည် (Hardcode for now)
-    USER_COINS = 500
+    USER_COINS = 500 # (Google Sheet မှ ဆွဲယူရမည်)
     
     context.user_data['premium_username'] = update.message.text
 
@@ -376,7 +375,6 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Welcome to our service. Please select from the menu below:"
     )
     
-    # Message အသစ်ပို့ခြင်း
     await query.message.reply_text(
         welcome_text,
         reply_markup=MAIN_MENU_KEYBOARD,
@@ -395,7 +393,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     logging.error("❌ Exception while handling an update:", exc_info=context.error)
 
-    # Bot Error ဖြစ်သွားကြောင်း User ကို ပြန်အကြောင်းကြားခြင်း
     if update.effective_chat:
         try:
             await update.effective_chat.send_message(
@@ -405,7 +402,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception:
             pass
 
-    # Admin ကို Error Message ပို့ခြင်း
     error_message = f"🚨 **BOT ERROR DETECTED!**\n\n" \
                     f"Error Type: `{context.error.__class__.__name__}`\n" \
                     f"Details: `{str(context.error)}`\n"
