@@ -118,6 +118,33 @@ def get_product_keyboard(product_type: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard_buttons)
 
 
+def get_user_data_from_sheet(user_id: int) -> dict:
+    """Retrieves user data from the user_data sheet."""
+    global WS_USER_DATA
+    if not WS_USER_DATA:
+        return {}
+    try:
+        # User ID ကို ရှာဖွေခြင်း
+        cell = WS_USER_DATA.find(str(user_id), in_column=1) 
+        if cell is None:
+            return {}
+        
+        # User data row ကို ဆွဲယူခြင်း (Assuming user_id, username, coin_balance, registration_date)
+        row_values = WS_USER_DATA.row_values(cell.row)
+        
+        data = {
+            'user_id': row_values[0] if len(row_values) > 0 else 'N/A',
+            'username': row_values[1] if len(row_values) > 1 else 'N/A',
+            'coin_balance': row_values[2] if len(row_values) > 2 else '0',
+            'registration_date': row_values[3] if len(row_values) > 3 else 'N/A'
+        }
+        return data
+
+    except Exception as e:
+        logging.error(f"❌ Error retrieving user data: {e}")
+        return {}
+
+
 def register_user_if_not_exists(user_id: int, username: str):
     """Checks if user exists in user_data sheet. If not, adds the user."""
     global WS_USER_DATA
@@ -143,10 +170,10 @@ def register_user_if_not_exists(user_id: int, username: str):
 
 # ----------------- C. Keyboard Definitions -----------------
 
-# Reply Keyboard (persistent bottom menu)
+# Reply Keyboard (User Account -> User Info သို့ ပြောင်းလဲခြင်း)
 ENGLISH_REPLY_KEYBOARD = [
     [
-        KeyboardButton("👤 User Account"),
+        KeyboardButton("👤 User Info"), # 👈 ပြောင်းလဲလိုက်ပါပြီ
         KeyboardButton("💰 Payment Method")
     ],
     [
@@ -182,15 +209,44 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         reply_markup=MAIN_MENU_KEYBOARD,
         parse_mode='Markdown'
     )
-    await update.message.reply_text(
-        "Available Services:",
-        reply_markup=INITIAL_INLINE_KEYBOARD
+    await show_service_menu(update, context) # Service Menu ကို ပြသရန်
+
+
+async def show_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reusable function to show the initial service selection menu."""
+    if update.callback_query:
+        await update.callback_query.message.reply_text(
+            "Available Services:",
+            reply_markup=INITIAL_INLINE_KEYBOARD
+        )
+    else:
+        await update.message.reply_text(
+            "Available Services:",
+            reply_markup=INITIAL_INLINE_KEYBOARD
+        )
+
+
+async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles User Info button press and displays details from sheet."""
+    user = update.effective_user
+    user_data = get_user_data_from_sheet(user.id)
+    
+    info_text = (
+        f"👤 **User Information**\n\n"
+        f"🔸 **Your ID:** `{user.id}`\n"
+        f"🔸 **Username:** {user_data.get('username', 'N/A')}\n"
+        f"🔸 **Coin Balance:** **{user_data.get('coin_balance', '0')}** MMK\n"
+        f"🔸 **Registered Since:** {user_data.get('registration_date', 'N/A')}"
     )
+    
+    # Back to Menu button (callback_data='menu_back' ကို အသုံးပြုမည်)
+    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data='menu_back')]])
 
-
-async def handle_user_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles User Account button press."""
-    await update.message.reply_text("👤 User Account details will be retrieved from Google Sheet. (To be implemented)")
+    await update.message.reply_text(
+        info_text,
+        reply_markup=back_keyboard,
+        parse_mode='Markdown'
+    )
 
 
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -199,7 +255,6 @@ async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard = get_payment_keyboard()
     
     if update.callback_query:
-        # Callback query ကလာရင် Message အသစ်ပို့ပြီး State ကို Reset လုပ်ခြင်း
         await update.callback_query.message.reply_text(
             "💰 Select a method for coin purchase:",
             reply_markup=keyboard
@@ -233,6 +288,14 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def handle_keyword_services(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles text messages containing 'premium', 'star', or 'price' to show service menu."""
+    text = update.message.text.lower()
+    
+    if any(keyword in text for keyword in ['premium', 'star', 'price']):
+        await show_service_menu(update, context)
+
+
 # ----------------- E. Payment Conversation Handlers -----------------
 
 async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -255,7 +318,6 @@ async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"**Please send the receipt (Screenshot) after the transfer.**"
     )
     
-    # Message Edit အစား reply_text ကိုပဲ သုံးပါမယ် (Conversation Stability အတွက်)
     await query.message.reply_text(transfer_text, reply_markup=back_keyboard, parse_mode='Markdown')
     return WAITING_FOR_RECEIPT
 
@@ -266,7 +328,7 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(
         "💌 Receipt sent to Admin. Please wait for coin deposit confirmation."
     )
-    return ConversationHandler.END # Conversation ပြီးဆုံးခြင်း
+    return ConversationHandler.END
 
 
 async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -274,7 +336,6 @@ async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    # Message အသစ်ပို့ပြီး Payment Menu ကို ပြန်ပြခြင်း
     await query.message.reply_text(
         "💰 Select a method for coin purchase:",
         reply_markup=get_payment_keyboard()
@@ -295,7 +356,8 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     
     keyboard = get_product_keyboard(product_type)
     
-    await query.edit_message_text(
+    # Message Edit အစား Message အသစ် Reply ပို့ခြင်း (Stability အတွက်)
+    await query.message.reply_text(
         f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
         reply_markup=keyboard,
         parse_mode='Markdown'
@@ -312,7 +374,8 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     
     context.user_data['product_key'] = selected_key
     
-    await query.edit_message_text(
+    # Message Edit အစား Message အသစ် Reply ပို့ခြင်း (Stability အတွက်)
+    await query.message.reply_text(
         f"You selected {selected_key.upper().replace('_', ' ')}.\n"
         f"Please send the **Telegram Phone Number** for the service. (Digits only)"
     )
@@ -326,7 +389,7 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
     if user_input and user_input.isdigit() and len(user_input) >= 8:
         context.user_data['premium_phone'] = user_input
         await update.message.reply_text(
-            f"Thank thank you. Now, please send the **Telegram Username** associated with the phone number {user_input}."
+            f"Thank you. Now, please send the **Telegram Username** associated with the phone number {user_input}."
         )
         return WAITING_FOR_USERNAME
     else:
@@ -355,7 +418,12 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Error: Product price in the sheet is not a valid number.")
         return ConversationHandler.END
 
-    USER_COINS = 500 # (Google Sheet မှ ဆွဲယူရမည်)
+    # Google Sheet မှ User Coin Balance ကို ဆွဲယူခြင်း
+    user_data = get_user_data_from_sheet(user_id)
+    try:
+        USER_COINS = int(user_data.get('coin_balance', 0))
+    except ValueError:
+        USER_COINS = 0
     
     context.user_data['premium_username'] = update.message.text
 
@@ -379,22 +447,9 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    user = query.effective_user
+    # Message အသစ် Reply ပို့ခြင်း
+    await show_service_menu(update, context) 
     
-    welcome_text = (
-        f"Hello, **{user.full_name}**! "
-        f"Welcome to our service. Please select from the menu below:"
-    )
-    
-    await query.message.reply_text(
-        welcome_text,
-        reply_markup=MAIN_MENU_KEYBOARD,
-        parse_mode='Markdown'
-    )
-    await query.message.reply_text(
-        "Available Services:",
-        reply_markup=INITIAL_INLINE_KEYBOARD
-    )
     return ConversationHandler.END
 
 # ----------------- G. Error Handler -----------------
@@ -461,7 +516,6 @@ def main() -> None:
                 CallbackQueryHandler(back_to_payment_menu, pattern='^payment_back') 
             ],
         },
-        # 🚨 Conversation ရောထွေးမှုမရှိစေရန် Fallback ထည့်သွင်းခြင်း
         fallbacks=[
             MessageHandler(filters.Text("💰 Payment Method"), handle_payment_method) 
         ]
@@ -492,9 +546,13 @@ def main() -> None:
     )
     application.add_handler(product_purchase_handler)
     
-    # 4. Message Handlers (Reply Keyboard buttons)
-    application.add_handler(MessageHandler(filters.Text("👤 User Account"), handle_user_account))
+    # 4. Message Handlers (Reply Keyboard buttons and Keywords)
+    application.add_handler(MessageHandler(filters.Text("👤 User Info"), handle_user_info)) # 👈 User Info
     application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center)) 
+    
+    # Keyword Handler: 'premium', 'star', or 'price' ကို စစ်ဆေးခြင်း
+    keyword_filter = filters.Text(['premium', 'star', 'price'], ignore_case=True)
+    application.add_handler(MessageHandler(keyword_filter, handle_keyword_services))
     
     # 5. Error Handler
     application.add_error_handler(error_handler) 
@@ -512,4 +570,3 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
-
