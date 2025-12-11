@@ -31,17 +31,22 @@ WS_USER_DATA = None
 WS_CONFIG = None
 WS_ORDERS = None
 
-# Conversation States (Payment Flow အတွက်)
-CHOOSING_PAYMENT_METHOD, WAITING_FOR_RECEIPT = range(2)
+# Conversation States
+(
+    CHOOSING_PAYMENT_METHOD, 
+    WAITING_FOR_RECEIPT,
+    SELECT_PRODUCT_PRICE, 
+    WAITING_FOR_PHONE, 
+    WAITING_FOR_USERNAME
+) = range(5)
 
 
-# ----------------- B. Google Sheet Initialization -----------------
+# ----------------- B. Google Sheet Initialization and Utilities -----------------
 
 def initialize_sheets():
     """Google Sheet Client ကို စတင်ခြင်း"""
     global GSHEET_CLIENT, WS_USER_DATA, WS_CONFIG, WS_ORDERS
     
-    # Render Environment မှ JSON Key ကို ရယူခြင်း
     sa_json_str = os.environ.get("GSPREAD_SA_JSON")
     
     if not sa_json_str or SHEET_ID == "YOUR_GOOGLE_SHEET_ID_HERE":
@@ -65,10 +70,52 @@ def initialize_sheets():
         logging.error(f"❌ Google Sheet ချိတ်ဆက်ရာတွင် Error: {e}")
         return False
 
+
+def get_config_data() -> dict:
+    """Reads the entire config sheet and returns a dictionary {key: value}."""
+    global WS_CONFIG
+    if not WS_CONFIG:
+        logging.error("❌ config sheet object is None.")
+        return {}
+    try:
+        records = WS_CONFIG.get_all_records()
+        # Ensure keys and values are treated as strings and remove surrounding whitespace
+        config_dict = {str(item.get('key')).strip(): str(item.get('value')).strip() 
+                       for item in records if item.get('key') and item.get('value') is not None}
+        return config_dict
+    except Exception as e:
+        logging.error(f"❌ Error reading config sheet: {e}")
+        return {}
+
+
+def get_product_keyboard(product_type: str) -> InlineKeyboardMarkup:
+    """Dynamically generates the product price keyboard based on product type (star/premium)."""
+    config = get_config_data()
+    keyboard_buttons = []
+    
+    prefix = f'{product_type}_'
+    product_keys = sorted([k for k in config.keys() if k.startswith(prefix)])
+
+    for key in product_keys:
+        price = config.get(key)
+        
+        if price:
+            button_name = key.replace(prefix, '').replace('_', ' ').title()
+            
+            # Format: ⭐ Star 100 (10000 MMK)
+            button_text = f"{'⭐' if product_type == 'star' else '💎'} {button_name} ({price} MMK)"
+            
+            keyboard_buttons.append([InlineKeyboardButton(button_text, callback_data=f'{key}')])
+
+    keyboard_buttons.append([InlineKeyboardButton("⬅️ Back to Service Menu", callback_data='menu_back')])
+    
+    return InlineKeyboardMarkup(keyboard_buttons)
+
+
 # ----------------- C. Keyboard Definitions -----------------
 
-# Reply Keyboard (စာရိုက်တဲ့နားမှာ ပေါ်နေမယ့် ခလုတ်များ)
-REPLY_KEYBOARD = [
+# Reply Keyboard (persistent bottom menu)
+ENGLISH_REPLY_KEYBOARD = [
     [
         KeyboardButton("👤 User Account"),
         KeyboardButton("💰 Payment Method")
@@ -77,9 +124,9 @@ REPLY_KEYBOARD = [
         KeyboardButton("❓ Help Center")
     ]
 ]
-MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(REPLY_KEYBOARD, resize_keyboard=True, one_time_keyboard=False)
+MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(ENGLISH_REPLY_KEYBOARD, resize_keyboard=True, one_time_keyboard=False)
 
-# Inline Keyboard (ပထမဆုံး ဝန်ဆောင်မှု ရွေးရန်)
+# Inline Keyboard (Initial Product Selection)
 INITIAL_INLINE_KEYBOARD = InlineKeyboardMarkup([
     [
         InlineKeyboardButton("⭐ Telegram Star", callback_data='product_star'),
@@ -91,80 +138,226 @@ INITIAL_INLINE_KEYBOARD = InlineKeyboardMarkup([
 # ----------------- D. Command & Message Handlers -----------------
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start ကို နှိပ်တဲ့အခါ အလုပ်လုပ်မယ့် Function ပါရှင်။"""
+    """Handles /start command."""
     user = update.effective_user
     
-    # User ရဲ့ နာမည်ကို Unicode ဖြင့် တွဲဖက် ပြသခြင်း
     welcome_text = (
-        f"𐙚 𝒥𝒾𝒥𝒾 ᥫ᭡ **{user.full_name}**၊ "
-        f"ကျွန်မရဲ့ ဝန်ဆောင်မှုများကို ရွေးချယ်နိုင်ပါတယ်:"
+        f"Hello, **{user.full_name}**! "
+        f"Welcome to our service. Please select from the menu below:"
     )
     
     await update.message.reply_text(
         welcome_text,
-        reply_markup=MAIN_MENU_KEYBOARD, # Reply Keyboard ကို ပြသခြင်း
+        reply_markup=MAIN_MENU_KEYBOARD,
         parse_mode='Markdown'
     )
-    # Inline Keyboard ကို သီးသန့် ပို့ခြင်း
     await update.message.reply_text(
-        "ရောင်းချပေးနိုင်တဲ့ ဝန်ဆောင်မှုတွေ:",
+        "Available Services:",
         reply_markup=INITIAL_INLINE_KEYBOARD
     )
 
 
 async def handle_user_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """User Account ကို နှိပ်တဲ့အခါ အလုပ်လုပ်မယ့် Function ပါရှင်။"""
-    # ဤနေရာတွင် Google Sheet မှ User Data (Coin Balance, Order History) များကို ရယူပြီး ပြသရပါမည်။
-    await update.message.reply_text("👤 User Account အချက်အလက်များကို Google Sheet မှ ဆွဲယူပြသပါမည်။ (ဆက်လက်ရေးသားရမည့်အပိုင်း)")
+    """Handles User Account button press."""
+    # ဤနေရာတွင် Google Sheet မှ User Data (Coin Balance, Order History) များကို ဆွဲယူပြီး ပြသရပါမည်။
+    await update.message.reply_text("👤 User Account details will be retrieved from Google Sheet. (To be implemented)")
 
 
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Payment Method ကို နှိပ်တဲ့အခါ အလုပ်လုပ်မယ့် Function ပါရှင်။"""
-    # ဤနေရာတွင် Coin ဈေးနှုန်းများကို Google Sheet မှ ဆွဲယူပြီး Payment ခလုတ်များ ပြရပါမည်။
+    """Handles Payment Method button press and initial payment options."""
+    # ဤနေရာတွင် Coin ဈေးနှုန်းများကို Google Sheet မှ ဆွဲယူပြီး ပြရပါမည်။
+    
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("💸 Kpay (KBZ Pay)", callback_data='pay_kpay'),
             InlineKeyboardButton("💸 Wave Money", callback_data='pay_wave')
         ]
     ])
-    await update.message.reply_text(
-        "💰 Coin ဈေးနှုန်းများကို ပြသပြီး၊ ငွေလွှဲဖို့အတွက် ပုံစံရွေးချယ်ပါရှင်။",
-        reply_markup=keyboard
-    )
-    return CHOOSING_PAYMENT_METHOD # Conversation Handler ကို စတင်ခြင်း
+    
+    # Update object မျိုးစုံကနေ message ကို ကိုင်တွယ်နိုင်အောင် ပြင်ဆင်ခြင်း
+    if update.callback_query:
+        await update.callback_query.edit_message_text(
+            "💰 Select a method for coin purchase:",
+            reply_markup=keyboard
+        )
+    else:
+        await update.message.reply_text(
+            "💰 Select a method for coin purchase:",
+            reply_markup=keyboard
+        )
+    return CHOOSING_PAYMENT_METHOD
 
 # ----------------- E. Payment Conversation Handlers -----------------
 
 async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Kpay/Wave ခလုတ် နှိပ်ပြီးနောက် အလုပ်လုပ်မယ့် Function ပါရှင်။"""
+    """Displays payment details and prompts for receipt."""
     query = update.callback_query
     await query.answer()
     
     payment_method = query.data.split('_')[1]
+    config = get_config_data() # Sheet မှ Data ယူခြင်း
     
-    # ဤနေရာတွင် Google Sheet (config) မှ Phone Number နှင့် Name များကို ဆွဲယူရပါမည်။
-    # ဥပမာ- config sheet ကနေ Kpay phone, Wave phone ယူရပါမယ်။
+    # Sheet မှ Admin ၏ ငွေလက်ခံမည့်အချက်အလက်များ ဆွဲယူခြင်း
+    admin_name = config.get(f'{payment_method}_name', 'Admin Name (Error)')
+    phone_number = config.get(f'{payment_method}_phone', '09XXXXXXXXX (Error)')
     
-    await query.edit_message_text(
-        f"✅ {payment_method.upper()} မှတစ်ဆင့် ငွေပေးချေရန်အတွက် အောက်ပါအတိုင်း လွှဲပြောင်းပေးပါ:\n\n"
-        f"ဖုန်းနံပါတ်: 09XXXXXXXXX (Sheet မှယူ)\n"
-        f"အမည်: Admin Name (Sheet မှယူ)\n\n"
-        f"ငွေလွှဲပြီးပါက **ပြေစာ (Screenshot)** ကို ပေးပို့ပေးပါရှင်။"
+    # Back button ကို ထည့်သွင်းခြင်း
+    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Payment Menu", callback_data='payment_back')]])
+
+    transfer_text = (
+        f"✅ Please transfer the payment via **{payment_method.upper()}** as follows:\n\n"
+        f"Name: **{admin_name}**\n"
+        f"Phone Number: **{phone_number}**\n\n"
+        f"**Please send the receipt (Screenshot) after the transfer.**"
     )
+    
+    await query.edit_message_text(transfer_text, reply_markup=back_keyboard, parse_mode='Markdown')
     return WAITING_FOR_RECEIPT
 
+
 async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User က ပေးပို့လိုက်တဲ့ ပြေစာကို လက်ခံခြင်းနှင့် Admin သို့ Forward လုပ်ခြင်း။"""
+    """Receives receipt (photo/text) and forwards to Admin."""
+    
+    # ဤအဆင့် (WAITING_FOR_RECEIPT state) တွင်သာ ဓာတ်ပုံ သို့ စာကို လက်ခံပါသည်။
+    
     # ဤနေရာတွင် Admin Group သို့ ပြေစာ၊ User Info, Coin ပမာဏ များကို Forward လုပ်ရပါမည်။
     
     await update.message.reply_text(
-        "💌 ငွေလွှဲပြေစာကို Admin သို့ ပေးပို့လိုက်ပါပြီရှင်။ Coin ထည့်သွင်းပေးရန် စောင့်ဆိုင်းနေပါသည်။"
+        "💌 Receipt sent to Admin. Please wait for coin deposit confirmation."
     )
     # Admin ထံမှ 'Done' သို့မဟုတ် 'Failed' Reply ရသည်အထိ ဒီအဆင့်မှာပဲ ရပ်နေပါမယ်။
-    return ConversationHandler.END # စမ်းသပ်ရန်အတွက် Conversation ကို ချက်ချင်း အဆုံးသတ်ထားသည်
+    return ConversationHandler.END
 
 
-# ----------------- F. Main Function (Application Integration) -----------------
+async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the 'Back' button press from the transfer details screen."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Payment Method Menu ကို ပြန်ပို့ခြင်း
+    return await handle_payment_method(query, context)
+
+
+# ----------------- G. Product Purchase Conversation Handlers -----------------
+
+async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles callback from 'Telegram Star' or 'Telegram Premium' button."""
+    query = update.callback_query
+    await query.answer()
+    
+    product_type = query.data.split('_')[1] # 'star' or 'premium'
+    context.user_data['product_type'] = product_type
+    
+    keyboard = get_product_keyboard(product_type)
+    
+    await query.edit_message_text(
+        f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
+        reply_markup=keyboard,
+        parse_mode='Markdown'
+    )
+    return SELECT_PRODUCT_PRICE
+
+
+async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles price button press and prompts for phone number."""
+    query = update.callback_query
+    await query.answer()
+    
+    selected_key = query.data # ဥပမာ: 'star_100' သို့မဟုတ် 'premium_1year'
+    
+    context.user_data['product_key'] = selected_key
+    
+    await query.edit_message_text(
+        f"You selected {selected_key.upper().replace('_', ' ')}.\n"
+        f"Please send the **Telegram Phone Number** for the service. (Digits only)"
+    )
+    return WAITING_FOR_PHONE
+
+
+async def validate_phone_and_ask_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Validates phone number input and asks for username."""
+    user_input = update.message.text
+    
+    if user_input and user_input.isdigit() and len(user_input) >= 8:
+        context.user_data['premium_phone'] = user_input
+        await update.message.reply_text(
+            f"Thank you. Now, please send the **Telegram Username** associated with the phone number {user_input}."
+        )
+        return WAITING_FOR_USERNAME
+    else:
+        await update.message.reply_text(
+            "❌ Invalid input. Please send the **Telegram Phone Number** (digits only) that you want to top up."
+        )
+        return WAITING_FOR_PHONE
+
+
+async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles username input, checks coin balance, and places the order."""
+    
+    user_id = update.effective_user.id
+    product_key = context.user_data.get('product_key', 'N/A')
+    
+    config = get_config_data()
+    price_mmk_str = config.get(product_key)
+    
+    if price_mmk_str is None:
+        await update.message.reply_text("❌ Error: Could not retrieve price for the selected product from the sheet.")
+        return ConversationHandler.END
+
+    try:
+        COIN_PRICE_REQUIRED = int(price_mmk_str) 
+    except ValueError:
+        await update.message.reply_text("❌ Error: Product price in the sheet is not a valid number.")
+        return ConversationHandler.END
+
+    # (၂) User ရဲ့ Coin Balance ကို Google Sheet (user_data) ကနေ စစ်ဆေးခြင်း
+    # ဤနေရာတွင် WS_USER_DATA မှ User ID ကို ရှာဖွေပြီး Coin Balance ကို ဆွဲယူရမည်။
+    USER_COINS = 500 # ဥပမာသာ (Google Sheet မှ ဆွဲယူရမည်)
+    
+    context.user_data['premium_username'] = update.message.text
+
+    if USER_COINS >= COIN_PRICE_REQUIRED:
+        # (၃) Coin ရှိပါက Order ကို Orders Sheet သို့ ရေးသွင်းခြင်းနှင့် Coin နှုတ်ခြင်း
+        # ... (Google Sheet Write Logic)
+        
+        await update.message.reply_text(
+            f"✅ Order Successful! {COIN_PRICE_REQUIRED} Coins have been deducted for {product_key.upper().replace('_', ' ')}. "
+            f"Please wait a moment while your service is being activated."
+        )
+        return ConversationHandler.END
+    else:
+        # (၄) Coin မရှိပါက ငွေဖြည့်ရန် ညွှန်ကြားခြင်း
+        await update.message.reply_text(
+            f"❌ Insufficient Coin Balance. You need {COIN_PRICE_REQUIRED} Coins but only have {USER_COINS} Coins. "
+            f"Please use the **'💰 Payment Method'** button to top up."
+        )
+        return ConversationHandler.END
+
+
+async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handles the 'Back' button press from the product selection menu."""
+    query = update.callback_query
+    await query.answer()
+    
+    user = query.effective_user
+    
+    welcome_text = (
+        f"Hello, **{user.full_name}**! "
+        f"Welcome to our service. Please select from the menu below:"
+    )
+    await query.message.reply_text(
+        welcome_text,
+        reply_markup=MAIN_MENU_KEYBOARD,
+        parse_mode='Markdown'
+    )
+    await query.message.reply_text(
+        "Available Services:",
+        reply_markup=INITIAL_INLINE_KEYBOARD
+    )
+    return ConversationHandler.END
+
+
+# ----------------- H. Main Function (Application Integration) -----------------
 
 def main() -> None:
     # Google Sheet ချိတ်ဆက်မှုကို စတင်ခြင်း
@@ -187,18 +380,48 @@ def main() -> None:
     # 1. Command Handlers
     application.add_handler(CommandHandler("start", start_command))
 
-    # 2. Conversation Handler (Payment Flow)
+    # 2. Payment Conversation Handler
     payment_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("💰 Payment Method"), handle_payment_method)],
         states={
-            CHOOSING_PAYMENT_METHOD: [CallbackQueryHandler(start_payment_conv, pattern='^pay_')],
-            WAITING_FOR_RECEIPT: [MessageHandler(filters.PHOTO | filters.TEXT, receive_receipt)], # ဓာတ်ပုံ သို့ စာကို လက်ခံခြင်း
+            CHOOSING_PAYMENT_METHOD: [
+                CallbackQueryHandler(start_payment_conv, pattern='^pay_'),
+                CallbackQueryHandler(back_to_payment_menu, pattern='^payment_back') 
+            ],
+            WAITING_FOR_RECEIPT: [
+                MessageHandler(filters.PHOTO | filters.TEXT, receive_receipt), 
+                CallbackQueryHandler(back_to_payment_menu, pattern='^payment_back') 
+            ],
         },
         fallbacks=[]
     )
     application.add_handler(payment_conv_handler)
     
-    # 3. Message Handlers (Reply Keyboard ခလုတ်များ)
+    # 3. Product Purchase Conversation Handler (Star and Premium)
+    product_purchase_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_product_purchase, pattern='^product_'),
+            CallbackQueryHandler(back_to_service_menu, pattern='^menu_back$')
+        ],
+        states={
+            SELECT_PRODUCT_PRICE: [
+                CallbackQueryHandler(select_product_price, pattern='^star_|^premium_'),
+                CallbackQueryHandler(back_to_service_menu, pattern='^menu_back$') 
+            ],
+            
+            WAITING_FOR_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, validate_phone_and_ask_username)
+            ],
+            
+            WAITING_FOR_USERNAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_product_order)
+            ]
+        },
+        fallbacks=[]
+    )
+    application.add_handler(product_purchase_handler)
+    
+    # 4. Message Handlers (Reply Keyboard ခလုတ်များ)
     application.add_handler(MessageHandler(filters.Text("👤 User Account"), handle_user_account))
     # filters.Text("❓ Help Center") ကတော့ ရိုးရိုး စာပြန်ပို့တဲ့ Function သုံးလို့ရပါတယ်။
 
