@@ -2,7 +2,7 @@ import os
 import logging
 import json
 import gspread
-import datetime # User Registration အတွက် ထည့်သွင်းခြင်း
+import datetime
 
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -17,16 +17,15 @@ from telegram.ext import (
 
 # ----------------- A. Configuration & Setup -----------------
 
-# Bot ၏ အခြေအနေများကို စစ်ဆေးရန် Logging စနစ် ဖွင့်ခြင်း
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 
-# Global Variables (လိုအပ်သော ကိန်းရှင်များ)
+# Global Variables
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789")) 
 SHEET_ID = os.environ.get("SHEET_ID", "YOUR_GOOGLE_SHEET_ID_HERE") 
 
-# Global Sheet References (Initialization မှာ တန်ဖိုးဖြည့်ပါမယ်)
+# Global Sheet References
 GSHEET_CLIENT = None
 WS_USER_DATA = None
 WS_CONFIG = None
@@ -45,13 +44,13 @@ WS_ORDERS = None
 # ----------------- B. Google Sheet Initialization and Utilities -----------------
 
 def initialize_sheets():
-    """Google Sheet Client ကို စတင်ခြင်း"""
+    """Initializes Google Sheet Client and connects to worksheets."""
     global GSHEET_CLIENT, WS_USER_DATA, WS_CONFIG, WS_ORDERS
     
     sa_json_str = os.environ.get("GSPREAD_SA_JSON")
     
     if not sa_json_str or SHEET_ID == "YOUR_GOOGLE_SHEET_ID_HERE":
-        logging.error("🚨 GSPREAD_SA_JSON သို့မဟုတ် SHEET_ID Environment Variable မတွေ့ပါရှင်။")
+        logging.error("🚨 GSPREAD_SA_JSON or SHEET_ID Environment Variable not found.")
         return False
         
     try:
@@ -63,11 +62,11 @@ def initialize_sheets():
         WS_CONFIG = sheet.worksheet("config")
         WS_ORDERS = sheet.worksheet("orders")
         
-        logging.info("✅ Google Sheet များ အောင်မြင်စွာ ချိတ်ဆက်ပြီးပါပြီရှင်။")
+        logging.info("✅ Google Sheets connected successfully.")
         return True
 
     except Exception as e:
-        logging.error(f"❌ Google Sheet ချိတ်ဆက်ရာတွင် Error: {e}")
+        logging.error(f"❌ Error connecting to Google Sheets: {e}")
         return False
 
 
@@ -75,7 +74,6 @@ def get_config_data() -> dict:
     """Reads the entire config sheet and returns a dictionary {key: value}."""
     global WS_CONFIG
     if not WS_CONFIG:
-        logging.error("❌ config sheet object is None.")
         return {}
     try:
         records = WS_CONFIG.get_all_records()
@@ -118,13 +116,12 @@ def register_user_if_not_exists(user_id: int, username: str):
         return
 
     try:
-        # User ID ကို ရှာဖွေခြင်း
         cell = WS_USER_DATA.find(str(user_id), in_column=1) 
         
         if cell is None:
-            # User မရှိသေးပါက တန်းအသစ်တစ်ခု ထည့်သွင်းခြင်း
             today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             new_row = [str(user_id), username if username else 'N/A', 0, today]
+            # Assuming headers are: user_id, username, coin_balance, registration_date
             WS_USER_DATA.append_row(new_row, value_input_option='USER_ENTERED')
             logging.info(f"✅ New user registered: {user_id}")
             
@@ -164,7 +161,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Handles /start command and registers user if not exists."""
     user = update.effective_user
     
-    # User Registration Logic ကို စတင်ခေါ်ယူခြင်း
+    # User Registration Logic
     register_user_if_not_exists(user.id, user.full_name) 
 
     welcome_text = (
@@ -185,14 +182,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def handle_user_account(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles User Account button press."""
-    # ဤနေရာတွင် Google Sheet မှ User Data (Coin Balance, Order History) များကို ဆွဲယူပြီး ပြသရပါမည်။
     await update.message.reply_text("👤 User Account details will be retrieved from Google Sheet. (To be implemented)")
 
 
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles Payment Method button press and initial payment options."""
-    config = get_config_data() # Sheet မှ Data ယူခြင်း
-    # ဤနေရာတွင် Coin ဈေးနှုန်းများကို ပြရပါမည်။
     
     keyboard = InlineKeyboardMarkup([
         [
@@ -201,7 +195,6 @@ async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
         ]
     ])
     
-    # Update object မျိုးစုံကနေ message ကို ကိုင်တွယ်နိုင်အောင် ပြင်ဆင်ခြင်း
     if update.callback_query:
         await update.callback_query.edit_message_text(
             "💰 Select a method for coin purchase:",
@@ -218,7 +211,6 @@ async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles Help Center button press, retrieves admin contact from config sheet."""
     config = get_config_data()
-    # Sheet ကနေ Admin Contact Username ကို ဆွဲယူခြင်း
     admin_username = config.get('admin_contact_username', '@AdminUsername_Error') 
     
     help_text = (
@@ -228,7 +220,6 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "We will respond as quickly as possible."
     )
     
-    # Main Menu ကို ပြန်သွားဖို့ Back ခလုတ် ထည့်ခြင်း
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data='menu_back')]])
     
     await update.message.reply_text(
@@ -246,13 +237,11 @@ async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     
     payment_method = query.data.split('_')[1]
-    config = get_config_data() # Sheet မှ Data ယူခြင်း
+    config = get_config_data() 
     
-    # Sheet မှ Admin ၏ ငွေလက်ခံမည့်အချက်အလက်များ ဆွဲယူခြင်း
     admin_name = config.get(f'{payment_method}_name', 'Admin Name (Error)')
     phone_number = config.get(f'{payment_method}_phone', '09XXXXXXXXX (Error)')
     
-    # Back button ကို ထည့်သွင်းခြင်း
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Payment Menu", callback_data='payment_back')]])
 
     transfer_text = (
@@ -269,8 +258,6 @@ async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receives receipt (photo/text) and forwards to Admin."""
     
-    # ဤနေရာတွင် Admin Group သို့ ပြေစာ၊ User Info, Coin ပမာဏ များကို Forward လုပ်ရပါမည်။
-    
     await update.message.reply_text(
         "💌 Receipt sent to Admin. Please wait for coin deposit confirmation."
     )
@@ -282,7 +269,6 @@ async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    # Payment Method Menu ကို ပြန်ပို့ခြင်း
     return await handle_payment_method(query, context)
 
 
@@ -293,7 +279,7 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer()
     
-    product_type = query.data.split('_')[1] # 'star' or 'premium'
+    product_type = query.data.split('_')[1]
     context.user_data['product_type'] = product_type
     
     keyboard = get_product_keyboard(product_type)
@@ -311,7 +297,7 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    selected_key = query.data # ဥပမာ: 'star_100' သို့မဟုတ် 'premium_1year'
+    selected_key = query.data
     
     context.user_data['product_key'] = selected_key
     
@@ -358,14 +344,12 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Error: Product price in the sheet is not a valid number.")
         return ConversationHandler.END
 
-    # (၂) User ရဲ့ Coin Balance ကို Google Sheet (user_data) ကနေ စစ်ဆေးခြင်း
-    # ဤနေရာတွင် WS_USER_DATA မှ User ID ကို ရှာဖွေပြီး Coin Balance ကို ဆွဲယူရမည်။
-    USER_COINS = 500 # ဥပမာသာ (Google Sheet မှ ဆွဲယူရမည်)
+    # Coin Balance ကို Google Sheet မှ ဆွဲယူရမည် (Hardcode for now)
+    USER_COINS = 500
     
     context.user_data['premium_username'] = update.message.text
 
     if USER_COINS >= COIN_PRICE_REQUIRED:
-        # (၃) Order ကို Orders Sheet သို့ ရေးသွင်းခြင်းနှင့် Coin နှုတ်ခြင်း
         
         await update.message.reply_text(
             f"✅ Order Successful! {COIN_PRICE_REQUIRED} Coins have been deducted for {product_key.upper().replace('_', ' ')}. "
@@ -373,7 +357,6 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         )
         return ConversationHandler.END
     else:
-        # (၄) Coin မရှိပါက ငွေဖြည့်ရန် ညွှန်ကြားခြင်း
         await update.message.reply_text(
             f"❌ Insufficient Coin Balance. You need {COIN_PRICE_REQUIRED} Coins but only have {USER_COINS} Coins. "
             f"Please use the **'💰 Payment Method'** button to top up."
@@ -382,7 +365,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the 'Back' button press from the product selection menu."""
+    """Handles the 'Back' button press from the product selection menu/Help Center."""
     query = update.callback_query
     await query.answer()
     
@@ -393,7 +376,7 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Welcome to our service. Please select from the menu below:"
     )
     
-    # ဤနေရာတွင် callback နှိပ်ပြီးနောက် Message အသစ်ပို့ခြင်း
+    # Message အသစ်ပို့ခြင်း
     await query.message.reply_text(
         welcome_text,
         reply_markup=MAIN_MENU_KEYBOARD,
@@ -405,13 +388,44 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     return ConversationHandler.END
 
+# ----------------- G. Error Handler -----------------
 
-# ----------------- G. Main Function (Application Integration) -----------------
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and notify the user and admin."""
+    
+    logging.error("❌ Exception while handling an update:", exc_info=context.error)
+
+    # Bot Error ဖြစ်သွားကြောင်း User ကို ပြန်အကြောင်းကြားခြင်း
+    if update.effective_chat:
+        try:
+            await update.effective_chat.send_message(
+                "🚨 **An unexpected error occurred!** Please try again or use the main menu buttons.",
+                parse_mode='Markdown'
+            )
+        except Exception:
+            pass
+
+    # Admin ကို Error Message ပို့ခြင်း
+    error_message = f"🚨 **BOT ERROR DETECTED!**\n\n" \
+                    f"Error Type: `{context.error.__class__.__name__}`\n" \
+                    f"Details: `{str(context.error)}`\n"
+    
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=error_message,
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logging.error(f"❌ Could not send error notification to admin: {e}")
+
+
+# ----------------- H. Main Function (Application Integration) -----------------
 
 def main() -> None:
     # Google Sheet ချိတ်ဆက်မှုကို စတင်ခြင်း
     if not initialize_sheets():
-        logging.error("❌ Bot ကို Google Sheet မပါဘဲ စတင်၍မရပါရှင်။")
+        logging.error("❌ Bot cannot start without Google Sheet connection.")
         return
 
     TOKEN = os.environ.get("BOT_TOKEN")
@@ -419,7 +433,7 @@ def main() -> None:
     RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL") 
     
     if not all([TOKEN, RENDER_URL]):
-        logging.error("🚨 လိုအပ်သော Environment Variables များ (BOT_TOKEN / RENDER_EXTERNAL_URL) မပြည့်စုံပါရှင်။")
+        logging.error("🚨 Missing required Environment Variables (BOT_TOKEN / RENDER_EXTERNAL_URL).")
         return
 
     application = Application.builder().token(TOKEN).build()
@@ -468,12 +482,15 @@ def main() -> None:
     )
     application.add_handler(product_purchase_handler)
     
-    # 4. Message Handlers (Reply Keyboard ခလုတ်များ)
+    # 4. Message Handlers (Reply Keyboard buttons)
     application.add_handler(MessageHandler(filters.Text("👤 User Account"), handle_user_account))
-    application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center)) # Help Center Handler
+    application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center)) 
     
-    # Webhook စနစ်ဖြင့် Bot ကို Run ခြင်း
-    print(f"✨ Bot ကို Webhook စနစ်ဖြင့် Port {PORT} မှာ စတင် Run နေပါပြီရှင်...")
+    # 5. Error Handler
+    application.add_error_handler(error_handler) 
+    
+    # Run Bot using Webhook
+    print(f"✨ Bot starting with Webhook on Port {PORT}...")
     logging.info(f"Setting Webhook URL to: {RENDER_URL}/{TOKEN}")
     
     application.run_webhook(
