@@ -1,8 +1,11 @@
+# meowpremium.py  (updated)
 import os
 import time
 import logging
 import json
 import datetime
+import re
+import uuid
 from typing import Dict, Optional, Tuple
 
 import gspread
@@ -138,7 +141,6 @@ def find_user_row(user_id: int) -> Optional[int]:
         if cell:
             return cell.row
     except Exception as e:
-        # find raises if not found sometimes; handle gracefully
         logger.debug("find_user_row exception: %s", e)
     return None
 
@@ -146,7 +148,7 @@ def find_user_row(user_id: int) -> Optional[int]:
 def get_user_data_from_sheet(user_id: int) -> Dict[str, str]:
     """Return a dict for the user from user_data sheet."""
     global WS_USER_DATA
-    default = {"user_id": str(user_id), "username": "N/A", "coin_balance": "0", "registration_date": "N/A"}
+    default = {"user_id": str(user_id), "username": "N/A", "coin_balance": "0", "registration_date": "N/A", "banned": "FALSE"}
     if not WS_USER_DATA:
         return default
     try:
@@ -197,26 +199,50 @@ def update_user_balance(user_id: int, new_balance: int) -> bool:
     try:
         # coin_balance is column 3 (index 2)
         WS_USER_DATA.update_cell(row, 3, str(new_balance))
-        # update last_active and (optionally) total_purchase/time
-        WS_USER_DATA.update_cell(row, 5, datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))  # last_active column (5)
+        # update last_active column (5)
+        WS_USER_DATA.update_cell(row, 5, datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
         return True
     except Exception as e:
         logger.error("Failed to update user balance: %s", e)
         return False
 
 
+def set_user_banned_status(user_id: int, banned: bool) -> bool:
+    """Set banned column for user (column 7)."""
+    global WS_USER_DATA
+    row = find_user_row(user_id)
+    if not row:
+        logger.error("set_user_banned_status: user row not found for %s", user_id)
+        return False
+    try:
+        WS_USER_DATA.update_cell(row, 7, "TRUE" if banned else "FALSE")
+        return True
+    except Exception as e:
+        logger.error("Failed to update banned status: %s", e)
+        return False
+
+
+def is_user_banned(user_id: int) -> bool:
+    data = get_user_data_from_sheet(user_id)
+    return str(data.get("banned", "FALSE")).upper() == "TRUE"
+
+
 # ------------ Orders logging ----------------
 def log_order(order: Dict) -> bool:
     """
     Append an order to the orders sheet.
-    Expected fields: user_id, username, product_key, price_mmk, phone, premium_username, status, timestamp, notes
+    Expected fields: order_id, user_id, username, product_key, price_mmk, phone, premium_username,
+    status, timestamp, notes, processed_by
     """
     global WS_ORDERS
     if not WS_ORDERS:
         logger.error("WS_ORDERS not initialized.")
         return False
     try:
+        # Ensure order_id
+        order_id = order.get("order_id") or str(uuid.uuid4())
         row = [
+            order_id,
             order.get("user_id", ""),
             order.get("username", ""),
             order.get("product_key", ""),
@@ -226,6 +252,7 @@ def log_order(order: Dict) -> bool:
             order.get("status", "PENDING"),
             order.get("timestamp", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
             order.get("notes", ""),
+            order.get("processed_by", ""),
         ]
         WS_ORDERS.append_row(row, value_input_option="USER_ENTERED")
         return True
@@ -277,10 +304,43 @@ INITIAL_INLINE_KEYBOARD = InlineKeyboardMarkup(
 )
 
 
+# ------------ Validation helpers ----------------
+PHONE_RE = re.compile(r"^\d{8,15}$")
+USERNAME_RE = re.compile(r"^@?([a-zA-Z0-9_]{5,32})$")  # capture without @
+
+def normalize_username(raw: str) -> str:
+    m = USERNAME_RE.match(raw)
+    if not m:
+        return ""
+    return "@" + m.group(1)
+
+
+def parse_amount_from_text(text: str) -> Optional[int]:
+    """
+    Try to extract MMK amount from text like '5000', '5,000', 'MMK 5000', 'Ks 5000' etc.
+    Returns integer or None.
+    """
+    if not text:
+        return None
+    # remove commas and common separators
+    cleaned = text.replace(",", "").replace(".", "")
+    # find first number with at least 3 digits (to avoid dates/time)
+    m = re.search(r"(\d{3,9})", cleaned)
+    if m:
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+    return None
+
+
 # ------------ Handlers ----------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     register_user_if_not_exists(user.id, user.full_name)
+    if is_user_banned(user.id):
+        await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားထားသည်။ Support ထံ ဆက်သွယ်ပါ။")
+        return
     welcome_text = f"Hello, **{user.full_name}**!\nWelcome — choose from the menu below."
     await update.message.reply_text(welcome_text, reply_markup=MAIN_MENU_KEYBOARD, parse_mode="Markdown")
     await show_service_menu(update, context)
@@ -289,6 +349,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show the initial service selection menu."""
     # support both callback_query and message
+    caller_id = None
+    if update.callback_query:
+        caller_id = update.callback_query.from_user.id
+    elif update.message:
+        caller_id = update.message.from_user.id
+    if caller_id and is_user_banned(caller_id):
+        if update.callback_query:
+            await update.callback_query.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
+        else:
+            await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
+        return
+
     if update.callback_query:
         try:
             await update.callback_query.message.edit_text("Available Services:", reply_markup=INITIAL_INLINE_KEYBOARD)
@@ -300,6 +372,9 @@ async def show_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if is_user_banned(user.id):
+        await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
+        return
     data = get_user_data_from_sheet(user.id)
     info_text = (
         f"👤 **User Information**\n\n"
@@ -307,6 +382,7 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔸 **Username:** {data.get('username')}\n"
         f"🔸 **Coin Balance:** **{data.get('coin_balance')}**\n"
         f"🔸 **Registered Since:** {data.get('registration_date')}\n"
+        f"🔸 **Banned:** {data.get('banned')}\n"
     )
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]])
     await update.message.reply_text(info_text, reply_markup=back_keyboard, parse_mode="Markdown")
@@ -331,6 +407,10 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry point to payment conversation: show Kpay/Wave options."""
+    user = update.effective_user
+    if is_user_banned(user.id):
+        await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
+        return ConversationHandler.END
     keyboard = get_payment_keyboard()
     if update.callback_query:
         await update.callback_query.message.reply_text("💰 Select a method for coin purchase:", reply_markup=keyboard)
@@ -357,7 +437,7 @@ async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✅ Please transfer via **{payment_method.upper()}** as follows:\n\n"
         f"Name: **{admin_name}**\n"
         f"Phone Number: **{phone_number}**\n\n"
-        "Please *send the receipt (screenshot)* here after transfer."
+        "Please *send the receipt (screenshot or text)* here after transfer. If amount is visible, bot will try to detect it automatically."
     )
     await query.message.reply_text(transfer_text, reply_markup=back_keyboard, parse_mode="Markdown")
     return WAITING_FOR_RECEIPT
@@ -376,11 +456,13 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Admin actions will update sheet and notify user.
     """
     user = update.effective_user
+    if is_user_banned(user.id):
+        await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
+        return ConversationHandler.END
+
     config = get_config_data()
     admin_contact_id = int(os.environ.get("ADMIN_ID", ADMIN_ID))
-    # Build a message to admin with inline approve/deny and encoded meta
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    # Save a receipt metadata in context.user_data for potential later use
     receipt_meta = {
         "from_user_id": user.id,
         "from_username": user.username or user.full_name,
@@ -388,47 +470,48 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     context.user_data["last_receipt_meta"] = receipt_meta
 
-    # Forward photo if exist, else forward text
+    detected_amount = None
     try:
+        # Try to extract amount from text if exists
         if update.message.photo:
-            # forward the largest photo to admin
+            # if photo, include a note and forward the photo to admin
             msg = await update.message.forward(chat_id=admin_contact_id)
-            forwarded_note = f"📥 Receipt from @{user.username or user.full_name} (id:{user.id})\nTime: {timestamp}"
-            # send admin approve/deny keyboard referencing user id and a small nonce (timestamp)
-            kb = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "✅ Approve",
-                            callback_data=f"admin_approve_receipt|{user.id}|{timestamp}",
-                        ),
-                        InlineKeyboardButton(
-                            "❌ Deny",
-                            callback_data=f"admin_deny_receipt|{user.id}|{timestamp}",
-                        ),
-                    ]
-                ]
-            )
-            await context.bot.send_message(chat_id=admin_contact_id, text=forwarded_note, reply_markup=kb)
+            # Attempt to parse caption for amount
+            detected_amount = parse_amount_from_text(update.message.caption or "")
         else:
-            # Text receipt -> forward text to admin
-            text = update.message.text or "<no text>"
+            text = update.message.text or ""
+            detected_amount = parse_amount_from_text(text)
             forwarded_text = f"📥 Receipt (text) from @{user.username or user.full_name} (id:{user.id})\nTime: {timestamp}\n\n{text}"
-            kb = InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "✅ Approve",
-                            callback_data=f"admin_approve_receipt|{user.id}|{timestamp}",
-                        ),
-                        InlineKeyboardButton(
-                            "❌ Deny",
-                            callback_data=f"admin_deny_receipt|{user.id}|{timestamp}",
-                        ),
-                    ]
-                ]
-            )
-            await context.bot.send_message(chat_id=admin_contact_id, text=forwarded_text, reply_markup=kb)
+            await context.bot.send_message(chat_id=admin_contact_id, text=forwarded_text)
+
+        # Build approve buttons with amounts from config
+        amounts_cfg = config.get("receipt_approve_amounts", "")  # e.g., "5000,10000,20000"
+        if amounts_cfg:
+            try:
+                choices = [int(x.strip()) for x in amounts_cfg.split(",") if x.strip().isdigit()]
+            except Exception:
+                choices = []
+        else:
+            choices = [5000, 10000, 20000]
+
+        # If detection found amount and not in choices, put it first
+        if detected_amount and detected_amount not in choices:
+            choices = [detected_amount] + choices
+
+        kb_rows = []
+        row = []
+        for i, amt in enumerate(choices):
+            row.append(InlineKeyboardButton(f"✅ Approve {amt} MMK", callback_data=f"admin_approve_receipt|{user.id}|{timestamp}|{amt}"))
+            # two per row
+            if len(row) == 2:
+                kb_rows.append(row)
+                row = []
+        if row:
+            kb_rows.append(row)
+        # add deny button
+        kb_rows.append([InlineKeyboardButton("❌ Deny", callback_data=f"admin_deny_receipt|{user.id}|{timestamp}")])
+
+        await context.bot.send_message(chat_id=admin_contact_id, text=f"📥 Receipt from @{user.username or user.full_name} (id:{user.id}) Time: {timestamp}", reply_markup=InlineKeyboardMarkup(kb_rows))
     except Exception as e:
         logger.error("Failed to forward receipt to admin: %s", e)
         await update.message.reply_text("❌ Could not forward receipt to admin. Please try again later.")
@@ -443,28 +526,29 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
     """Admin pressed Approve on a forwarded receipt. This should add coins (top-up) to the user."""
     query = update.callback_query
     await query.answer()
-    data = query.data  # admin_approve_receipt|<user_id>|<timestamp>
+    data = query.data  # admin_approve_receipt|<user_id>|<timestamp>|<amount>
     parts = data.split("|")
-    if len(parts) < 3:
+    if len(parts) < 4:
         await query.message.reply_text("Invalid admin action.")
         return
 
-    action, user_id_str, ts = parts[0], parts[1], parts[2]
+    action, user_id_str, ts, amount_str = parts[0], parts[1], parts[2], parts[3]
     try:
         user_id = int(user_id_str)
+        approved_amount = int(amount_str)
     except ValueError:
-        await query.message.reply_text("Invalid user id.")
+        await query.message.reply_text("Invalid parameters.")
         return
 
-    # For security: ensure this callback is from admin
+    # Ensure this callback is from admin
     if query.from_user.id != ADMIN_ID:
         await query.message.reply_text("You are not authorized to perform this action.")
         return
 
-    # How many coins to add? Admin can define in config, or we can default: For a receipt approval flow
-    # here we will read config values: last_receipt_amount_default (fallback)
+    # Convert amount to coins (configurable ratio)
     config = get_config_data()
-    default_topup_coins = int(config.get("default_topup_coins", "100"))
+    ratio = float(config.get("mmk_to_coins_ratio", "1"))  # default 1 MMK -> 1 coin
+    coins_to_add = int(approved_amount * ratio)
 
     # Update user coin balance in sheet
     user_data = get_user_data_from_sheet(user_id)
@@ -472,7 +556,7 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         current_coins = int(user_data.get("coin_balance", "0"))
     except ValueError:
         current_coins = 0
-    new_balance = current_coins + default_topup_coins
+    new_balance = current_coins + coins_to_add
 
     ok = update_user_balance(user_id, new_balance)
     if not ok:
@@ -481,15 +565,17 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
 
     # Log the topup as an order in WS_ORDERS with status APPROVED_RECEIPT
     order = {
+        "order_id": str(uuid.uuid4()),
         "user_id": user_id,
         "username": user_data.get("username", ""),
         "product_key": "COIN_TOPUP",
-        "price_mmk": default_topup_coins,
+        "price_mmk": approved_amount,
         "phone": "",
         "premium_username": "",
         "status": "APPROVED_RECEIPT",
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "notes": f"Receipt approved by admin {query.from_user.id} at {ts}",
+        "processed_by": str(query.from_user.id),
     }
     log_order(order)
 
@@ -497,7 +583,7 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"✅ Your payment has been approved by admin. {default_topup_coins} Coins added. New balance: {new_balance} Coins.",
+            text=f"✅ Your payment of {approved_amount} MMK has been approved by admin. {coins_to_add} Coins added. New balance: {new_balance} Coins.",
         )
         await query.message.reply_text("✅ Approved and user balance updated.")
     except Exception as e:
@@ -527,6 +613,7 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
 
     # Log denial to orders
     order = {
+        "order_id": str(uuid.uuid4()),
         "user_id": user_id,
         "username": get_user_data_from_sheet(user_id).get("username", ""),
         "product_key": "COIN_TOPUP",
@@ -536,6 +623,7 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         "status": "DENIED_RECEIPT",
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "notes": f"Receipt denied by admin {query.from_user.id} at {ts}",
+        "processed_by": str(query.from_user.id),
     }
     log_order(order)
 
@@ -600,9 +688,8 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def validate_phone_and_ask_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    # Basic validation: digits and length 8-15
-    if text.isdigit() and 8 <= len(text) <= 15:
+    text = (update.message.text or "").strip()
+    if PHONE_RE.match(text):
         context.user_data["premium_phone"] = text
         await update.message.reply_text(
             f"Thank you. Now please send the **Telegram Username** associated with {text} (start with @ or plain username)."
@@ -617,13 +704,23 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     """Deduct coins, log order, and notify user. If insufficient coins, prompt to top up."""
     user = update.effective_user
     user_id = user.id
+
+    if is_user_banned(user_id):
+        await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
+        return ConversationHandler.END
+
     product_key = context.user_data.get("product_key")
     premium_phone = context.user_data.get("premium_phone", "")
-    premium_username = update.message.text.strip()
+    raw_username = (update.message.text or "").strip()
+    premium_username = normalize_username(raw_username)
 
     if not product_key:
         await update.message.reply_text("❌ No product selected. Please start again.")
         return ConversationHandler.END
+
+    if not premium_username:
+        await update.message.reply_text("❌ Invalid Telegram username. It should be 5-32 chars, letters/numbers/underscore. Try again.")
+        return WAITING_FOR_USERNAME
 
     config = get_config_data()
     price_mmk_str = config.get(product_key)
@@ -649,6 +746,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         )
         # Log attempted order as FAILED_INSUFFICIENT_FUNDS
         order = {
+            "order_id": str(uuid.uuid4()),
             "user_id": user_id,
             "username": user_data.get("username", ""),
             "product_key": product_key,
@@ -670,6 +768,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
     # Log order as SUCCESS
     order = {
+        "order_id": str(uuid.uuid4()),
         "user_id": user_id,
         "username": user_data.get("username", ""),
         "product_key": product_key,
@@ -689,6 +788,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     try:
         admin_msg = (
             f"🛒 New Order\n"
+            f"Order ID: {order['order_id']}\n"
             f"User: @{user.username or user.full_name} (id:{user_id})\n"
             f"Product: {product_key}\n"
             f"Price: {price_needed}\n"
@@ -710,14 +810,60 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-# Error handler
+# Admin-only simple panel via commands (ban/unban/check-orders)
+async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("You are not authorized.")
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /ban <user_id>")
+        return
+    try:
+        target = int(args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid user id.")
+        return
+    ok = set_user_banned_status(target, True)
+    if ok:
+        await update.message.reply_text(f"User {target} banned.")
+    else:
+        await update.message.reply_text("Failed to ban user.")
+
+
+async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("You are not authorized.")
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /unban <user_id>")
+        return
+    try:
+        target = int(args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid user id.")
+        return
+    ok = set_user_banned_status(target, False)
+    if ok:
+        await update.message.reply_text(f"User {target} unbanned.")
+    else:
+        await update.message.reply_text("Failed to unban user.")
+
+
+# Error handler (sanitized)
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("Exception while handling an update:", exc_info=context.error)
-    # notify admin
+    # Sanitize the exception message to avoid leaking environment variables or long traces.
+    err_type = type(context.error).__name__ if context.error else "UnknownError"
+    err_msg = str(context.error)[:1000] if context.error else "No details"
+    logger.error("Exception while handling an update: %s: %s", err_type, err_msg)
+    # notify admin with sanitized message
     try:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"🚨 Bot Error: {type(context.error).__name__}\n{context.error}",
+            text=f"🚨 Bot Error: {err_type}\n{err_msg}",
         )
     except Exception:
         pass
@@ -730,14 +876,18 @@ def main():
         logger.error("Bot cannot start due to Google Sheets initialization failure.")
         return
 
-    if not BOT_TOKEN or not RENDER_EXTERNAL_URL:
-        logger.error("Missing BOT_TOKEN or RENDER_EXTERNAL_URL environment variable.")
+    if not BOT_TOKEN:
+        logger.error("Missing BOT_TOKEN environment variable.")
         return
 
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Command handlers
     application.add_handler(CommandHandler("start", start_command))
+
+    # Admin commands
+    application.add_handler(CommandHandler("ban", admin_ban_user))
+    application.add_handler(CommandHandler("unban", admin_unban_user))
 
     # Payment Conversation Handler
     payment_conv_handler = ConversationHandler(
@@ -792,16 +942,20 @@ def main():
     # Global error handler
     application.add_error_handler(error_handler)
 
-    # Run webhook
+    # Run webhook if RENDER_EXTERNAL_URL provided; otherwise fallback to polling
     token = BOT_TOKEN
-    listen = "0.0.0.0"
-    port = PORT
-    url_path = token
-    webhook_url = f"{RENDER_EXTERNAL_URL}/{token}"
-    print(f"Starting webhook on port {port}, URL: {webhook_url}")
-    logger.info("Setting webhook URL to: %s", webhook_url)
-
-    application.run_webhook(listen=listen, port=port, url_path=url_path, webhook_url=webhook_url)
+    if RENDER_EXTERNAL_URL:
+        listen = "0.0.0.0"
+        port = PORT
+        url_path = token
+        webhook_url = f"{RENDER_EXTERNAL_URL}/{token}"
+        print(f"Starting webhook on port {port}, URL: {webhook_url}")
+        logger.info("Setting webhook URL to: %s", webhook_url)
+        application.run_webhook(listen=listen, port=port, url_path=url_path, webhook_url=webhook_url)
+    else:
+        # Polling fallback for local/dev usage
+        logger.info("RENDER_EXTERNAL_URL not set — using long polling (development mode).")
+        application.run_polling()
 
 
 if __name__ == "__main__":
