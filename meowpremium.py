@@ -1,4 +1,3 @@
-meowpremium.py  (full updated - Coin Package flow + admin approve amounts + ratio 0.5)
 import os
 import time
 import logging
