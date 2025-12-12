@@ -213,13 +213,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def show_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Reusable function to show the initial service selection menu."""
     if update.callback_query:
-        # Callback query ကနေ ပြန်ခေါ်ရင်၊ message.reply_text ကို သုံးခြင်း
         await update.callback_query.message.reply_text( 
             "Available Services:",
             reply_markup=INITIAL_INLINE_KEYBOARD
         )
     else:
-        # ရိုးရိုး message ကနေ လာရင်
         await update.message.reply_text(
             "Available Services:",
             reply_markup=INITIAL_INLINE_KEYBOARD
@@ -289,7 +287,9 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def handle_keyword_services(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles text messages containing 'premium', 'star', or 'price' to show service menu."""
-    text = update.message.text.lower()
+    
+    # 🚨 input ကို စလုံးအသေးသို့ ပြောင်းပြီး စစ်ဆေးခြင်း
+    text = update.message.text.lower() 
     
     if any(keyword in text for keyword in ['premium', 'star', 'price']):
         await show_service_menu(update, context)
@@ -355,7 +355,7 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     
     keyboard = get_product_keyboard(product_type)
     
-    # 🚨 Stability အတွက် query.message.reply_text ကို သုံးခြင်း
+    # Stability အတွက် reply_text ကို သုံးခြင်း
     await query.message.reply_text( 
         f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
         reply_markup=keyboard,
@@ -373,7 +373,7 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     
     context.user_data['product_key'] = selected_key
     
-    # 🚨 Stability အတွက် query.message.reply_text ကို သုံးခြင်း
+    # Stability အတွက် reply_text ကို သုံးခြင်း
     await query.message.reply_text(
         f"You selected {selected_key.upper().replace('_', ' ')}.\n"
         f"Please send the **Telegram Phone Number** for the service. (Digits only)"
@@ -539,7 +539,6 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_product_order)
             ]
         },
-        # Conversation ပြန်စဖို့အတွက် Callback ကို ထည့်ပေးထားခြင်း
         fallbacks=[
             CallbackQueryHandler(back_to_service_menu, pattern='^menu_back$')
         ]
@@ -551,7 +550,8 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center)) 
     
     # Keyword Handler: 'premium', 'star', or 'price' ကို စစ်ဆေးခြင်း
-    keyword_filter = filters.Text(['premium', 'star', 'price'], ignore_case=True)
+    # 🚨 TypeError ကို ဖြေရှင်းရန် ignore_case=True ကို ဖယ်လိုက်ပါပြီ။
+    keyword_filter = filters.Text(['premium', 'star', 'price'])
     application.add_handler(MessageHandler(keyword_filter, handle_keyword_services))
     
     # 5. Error Handler
