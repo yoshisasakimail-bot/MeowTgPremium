@@ -211,13 +211,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def show_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reusable function to show the initial service selection menu."""
+    """Reusable function to show the initial service selection menu (Uses edit_text for callbacks)."""
     if update.callback_query:
-        await update.callback_query.message.reply_text( 
-            "Available Services:",
-            reply_markup=INITIAL_INLINE_KEYBOARD
-        )
+        # 🚨 Message အသစ် reply အစား Message အဟောင်းကို ပြင်ဆင် (Edit) ပေးခြင်း
+        try:
+            await update.callback_query.message.edit_text( 
+                "Available Services:",
+                reply_markup=INITIAL_INLINE_KEYBOARD
+            )
+        except Exception as e:
+            logging.warning(f"Failed to edit message for service menu, replying instead: {e}")
+            await update.callback_query.message.reply_text( 
+                "Available Services:",
+                reply_markup=INITIAL_INLINE_KEYBOARD
+            )
     else:
+        # ရိုးရိုး message ကနေ လာရင်တော့ message အသစ် ပို့ရမယ်
         await update.message.reply_text(
             "Available Services:",
             reply_markup=INITIAL_INLINE_KEYBOARD
@@ -251,6 +260,7 @@ async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
     
     keyboard = get_payment_keyboard()
     
+    # ဤနေရာတွင် Edit လုပ်ရန် မလိုပါ။ Conversation Entry Point ဖြစ်၍ Reply လုပ်ပါမည်။
     if update.callback_query:
         await update.callback_query.message.reply_text(
             "💰 Select a method for coin purchase:",
@@ -354,11 +364,20 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     
     keyboard = get_product_keyboard(product_type)
     
-    await query.message.reply_text( 
-        f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
-        reply_markup=keyboard,
-        parse_mode='Markdown'
-    )
+    # Message Edit လုပ်ရန် ပြောင်းလဲခြင်း
+    try:
+        await query.message.edit_text( 
+            f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+    except Exception:
+        await query.message.reply_text( 
+            f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
+            reply_markup=keyboard,
+            parse_mode='Markdown'
+        )
+        
     return SELECT_PRODUCT_PRICE
 
 
@@ -371,10 +390,18 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     
     context.user_data['product_key'] = selected_key
     
-    await query.message.reply_text(
-        f"You selected {selected_key.upper().replace('_', ' ')}.\n"
-        f"Please send the **Telegram Phone Number** for the service. (Digits only)"
-    )
+    # Message Edit လုပ်ရန် ပြောင်းလဲခြင်း
+    try:
+        await query.message.edit_text(
+            f"You selected {selected_key.upper().replace('_', ' ')}.\n"
+            f"Please send the **Telegram Phone Number** for the service. (Digits only)"
+        )
+    except Exception:
+        await query.message.reply_text(
+            f"You selected {selected_key.upper().replace('_', ' ')}.\n"
+            f"Please send the **Telegram Phone Number** for the service. (Digits only)"
+        )
+        
     return WAITING_FOR_PHONE
 
 
@@ -438,10 +465,11 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handles the 'Back' button press from the product selection menu/Help Center."""
+    """Handles the 'Back' button press from the product selection menu/Help Center. Uses edit_text."""
     query = update.callback_query
     await query.answer()
     
+    # show_service_menu ကို ခေါ်ခြင်းဖြင့် edit_text ကို အသုံးပြုပါမည်။
     await show_service_menu(update, context) 
     
     return ConversationHandler.END
@@ -518,7 +546,7 @@ def main() -> None:
     
     # 3. Product Purchase Conversation Handler (Star and Premium)
     product_purchase_handler = ConversationHandler(
-        # 🚨 entry_points ကို ပြင်ဆင်လိုက်ပါပြီ။ menu_back ကို ဖြုတ်လိုက်ခြင်း
+        # entry_points မှာ product_ callback ကိုသာ ထားရှိခြင်း
         entry_points=[
             CallbackQueryHandler(start_product_purchase, pattern='^product_')
         ],
