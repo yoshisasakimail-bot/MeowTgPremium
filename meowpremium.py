@@ -288,7 +288,6 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_keyword_services(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles text messages containing 'premium', 'star', or 'price' to show service menu."""
     
-    # 🚨 input ကို စလုံးအသေးသို့ ပြောင်းပြီး စစ်ဆေးခြင်း
     text = update.message.text.lower() 
     
     if any(keyword in text for keyword in ['premium', 'star', 'price']):
@@ -355,7 +354,6 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     
     keyboard = get_product_keyboard(product_type)
     
-    # Stability အတွက် reply_text ကို သုံးခြင်း
     await query.message.reply_text( 
         f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
         reply_markup=keyboard,
@@ -373,7 +371,6 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     
     context.user_data['product_key'] = selected_key
     
-    # Stability အတွက် reply_text ကို သုံးခြင်း
     await query.message.reply_text(
         f"You selected {selected_key.upper().replace('_', ' ')}.\n"
         f"Please send the **Telegram Phone Number** for the service. (Digits only)"
@@ -521,9 +518,9 @@ def main() -> None:
     
     # 3. Product Purchase Conversation Handler (Star and Premium)
     product_purchase_handler = ConversationHandler(
+        # 🚨 entry_points ကို ပြင်ဆင်လိုက်ပါပြီ။ menu_back ကို ဖြုတ်လိုက်ခြင်း
         entry_points=[
-            CallbackQueryHandler(start_product_purchase, pattern='^product_'),
-            CallbackQueryHandler(back_to_service_menu, pattern='^menu_back$')
+            CallbackQueryHandler(start_product_purchase, pattern='^product_')
         ],
         states={
             SELECT_PRODUCT_PRICE: [
@@ -550,7 +547,6 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center)) 
     
     # Keyword Handler: 'premium', 'star', or 'price' ကို စစ်ဆေးခြင်း
-    # 🚨 TypeError ကို ဖြေရှင်းရန် ignore_case=True ကို ဖယ်လိုက်ပါပြီ။
     keyword_filter = filters.Text(['premium', 'star', 'price'])
     application.add_handler(MessageHandler(keyword_filter, handle_keyword_services))
     
