@@ -124,12 +124,10 @@ def get_user_data_from_sheet(user_id: int) -> dict:
     if not WS_USER_DATA:
         return {}
     try:
-        # User ID ကို ရှာဖွေခြင်း
         cell = WS_USER_DATA.find(str(user_id), in_column=1) 
         if cell is None:
             return {}
         
-        # User data row ကို ဆွဲယူခြင်း (Assuming user_id, username, coin_balance, registration_date)
         row_values = WS_USER_DATA.row_values(cell.row)
         
         data = {
@@ -173,7 +171,7 @@ def register_user_if_not_exists(user_id: int, username: str):
 # Reply Keyboard (User Account -> User Info သို့ ပြောင်းလဲခြင်း)
 ENGLISH_REPLY_KEYBOARD = [
     [
-        KeyboardButton("👤 User Info"), # 👈 ပြောင်းလဲလိုက်ပါပြီ
+        KeyboardButton("👤 User Info"), 
         KeyboardButton("💰 Payment Method")
     ],
     [
@@ -209,17 +207,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         reply_markup=MAIN_MENU_KEYBOARD,
         parse_mode='Markdown'
     )
-    await show_service_menu(update, context) # Service Menu ကို ပြသရန်
+    await show_service_menu(update, context) 
 
 
 async def show_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Reusable function to show the initial service selection menu."""
     if update.callback_query:
-        await update.callback_query.message.reply_text(
+        # Callback query ကနေ ပြန်ခေါ်ရင်၊ message.reply_text ကို သုံးခြင်း
+        await update.callback_query.message.reply_text( 
             "Available Services:",
             reply_markup=INITIAL_INLINE_KEYBOARD
         )
     else:
+        # ရိုးရိုး message ကနေ လာရင်
         await update.message.reply_text(
             "Available Services:",
             reply_markup=INITIAL_INLINE_KEYBOARD
@@ -239,7 +239,6 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"🔸 **Registered Since:** {user_data.get('registration_date', 'N/A')}"
     )
     
-    # Back to Menu button (callback_data='menu_back' ကို အသုံးပြုမည်)
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data='menu_back')]])
 
     await update.message.reply_text(
@@ -356,8 +355,8 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     
     keyboard = get_product_keyboard(product_type)
     
-    # Message Edit အစား Message အသစ် Reply ပို့ခြင်း (Stability အတွက်)
-    await query.message.reply_text(
+    # 🚨 Stability အတွက် query.message.reply_text ကို သုံးခြင်း
+    await query.message.reply_text( 
         f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
         reply_markup=keyboard,
         parse_mode='Markdown'
@@ -374,7 +373,7 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     
     context.user_data['product_key'] = selected_key
     
-    # Message Edit အစား Message အသစ် Reply ပို့ခြင်း (Stability အတွက်)
+    # 🚨 Stability အတွက် query.message.reply_text ကို သုံးခြင်း
     await query.message.reply_text(
         f"You selected {selected_key.upper().replace('_', ' ')}.\n"
         f"Please send the **Telegram Phone Number** for the service. (Digits only)"
@@ -418,7 +417,6 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Error: Product price in the sheet is not a valid number.")
         return ConversationHandler.END
 
-    # Google Sheet မှ User Coin Balance ကို ဆွဲယူခြင်း
     user_data = get_user_data_from_sheet(user_id)
     try:
         USER_COINS = int(user_data.get('coin_balance', 0))
@@ -447,7 +445,6 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    # Message အသစ် Reply ပို့ခြင်း
     await show_service_menu(update, context) 
     
     return ConversationHandler.END
@@ -542,12 +539,15 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_product_order)
             ]
         },
-        fallbacks=[]
+        # Conversation ပြန်စဖို့အတွက် Callback ကို ထည့်ပေးထားခြင်း
+        fallbacks=[
+            CallbackQueryHandler(back_to_service_menu, pattern='^menu_back$')
+        ]
     )
     application.add_handler(product_purchase_handler)
     
     # 4. Message Handlers (Reply Keyboard buttons and Keywords)
-    application.add_handler(MessageHandler(filters.Text("👤 User Info"), handle_user_info)) # 👈 User Info
+    application.add_handler(MessageHandler(filters.Text("👤 User Info"), handle_user_info))
     application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center)) 
     
     # Keyword Handler: 'premium', 'star', or 'price' ကို စစ်ဆေးခြင်း
