@@ -34,12 +34,10 @@ WS_ORDERS = None
 
 # Conversation States
 (
-    # Coin Purchase Flow States
     SELECT_COIN_AMOUNT,
     CHOOSING_PAYMENT_METHOD, 
     WAITING_FOR_RECEIPT,
     
-    # Product Purchase Flow States
     SELECT_PRODUCT_PRICE, 
     WAITING_FOR_PHONE, 
     WAITING_FOR_USERNAME
@@ -278,16 +276,25 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles Payment Method button press and displays Coin purchase options."""
     
-    keyboard = get_coin_purchase_keyboard() # Coin ဈေးနှုန်းများပါသော Keyboard
-    
+    keyboard = get_coin_purchase_keyboard() 
     text = "💰 Select the coin amount you wish to purchase:"
     
+    # 🚨 ပြင်ဆင်ချက်: Reply Keyboard မှ လာရင် Message အသစ်ပို့၊ Callback မှ လာရင် Edit လုပ်
     if update.callback_query:
-        await update.callback_query.message.edit_text( # Message Edit လုပ်ခြင်း
-            text,
-            reply_markup=keyboard
-        )
+        # Conversation အသစ် စနေရင်တောင် Edit လုပ်နိုင်ရန် ကြိုးစားကြည့်သည် (Callback Query မှ လာလျှင်)
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.message.edit_text( 
+                text,
+                reply_markup=keyboard
+            )
+        except Exception:
+             await update.callback_query.message.reply_text( 
+                text,
+                reply_markup=keyboard
+            )
     else:
+        # Reply Keyboard မှ Message Handler ကနေ လာလျှင်
         await update.message.reply_text(
             text,
             reply_markup=keyboard
@@ -406,7 +413,6 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     price_mmk = context.user_data.get('price_mmk', 'N/A')
     payment_method = context.user_data.get('payment_method', 'N/A')
     
-    # 🚨 Admin ID ကို ADMIN_ID Global Variable မှ တိုက်ရိုက်ယူပါမည်။
     ADMIN_CHAT_ID = ADMIN_ID 
     
     # 1. Admin ကို ပို့မည့် စာသား
@@ -436,6 +442,8 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             parse_mode='Markdown'
         )
     else:
+        # နှိပ်စရာ Button လာရင် ဒီမှာ ဖမ်းပြီး Conversation Flow ကို မပျက်စေဘဲ စောင့်နေခိုင်းနိုင်သည်
+        # ယခုအခြေအနေတွင် မလိုအပ်သောကြောင့် WAITING_FOR_RECEIPT တွင် ဆက်ရှိနေမည်
         await update.message.reply_text("❌ Please send the screenshot as a **Photo** or a clear **Text Message**.")
         return WAITING_FOR_RECEIPT
 
@@ -446,7 +454,6 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "*(This conversation is now paused. You can still use the main menu buttons.)*"
     )
     
-    # Conversation ပြီးဆုံးခြင်း
     return ConversationHandler.END
 
 
@@ -455,7 +462,6 @@ async def back_to_coin_select(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     
-    # handle_payment_method ကို ခေါ်ပြီး Message Edit လုပ်ခြင်းဖြင့် Coin Select Menu ကို ပြန်ပြမည်
     await handle_payment_method(update, context) 
     
     return SELECT_COIN_AMOUNT 
@@ -487,7 +493,7 @@ def get_product_keyboard(product_type: str) -> InlineKeyboardMarkup:
 
 
 async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (ယခင် code အတိုင်း)
+    """Handles callback from 'Telegram Star' or 'Telegram Premium' button."""
     query = update.callback_query
     await query.answer()
     
@@ -513,7 +519,7 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (ယခင် code အတိုင်း)
+    """Handles price button press and prompts for phone number."""
     query = update.callback_query
     await query.answer()
     
@@ -536,7 +542,7 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def validate_phone_and_ask_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ... (ယခင် code အတိုင်း)
+    """Validates phone number input and asks for username."""
     user_input = update.message.text
     
     if user_input and user_input.isdigit() and len(user_input) >= 8:
@@ -581,7 +587,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
     if USER_COINS >= COIN_PRICE_REQUIRED:
         
-        # 🚨 Coin နှုတ်ယူခြင်း (Deduction) Logic ကို ဤနေရာတွင် ထည့်ရပါမည်။ (e.g., update_user_coin_balance(user_id, -COIN_PRICE_REQUIRED))
+        # Coin နှုတ်ယူခြင်း Logic ကို ဤနေရာတွင် ထည့်ရပါမည်။
         
         await update.message.reply_text(
             f"✅ Order Successful! {COIN_PRICE_REQUIRED} Coins have been deducted for {product_key.upper().replace('_', ' ')}. "
@@ -669,7 +675,8 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ----------------- H. Error Handler -----------------
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # ... (ယခင် code အတိုင်း)
+    """Log the error and notify the user and admin."""
+    
     logging.error("❌ Exception while handling an update:", exc_info=context.error)
 
     if update.effective_chat:
@@ -725,16 +732,16 @@ def main() -> None:
             ],
             CHOOSING_PAYMENT_METHOD: [
                 CallbackQueryHandler(choose_payment_method, pattern='^pay_'),
-                CallbackQueryHandler(back_to_coin_select, pattern='^coin_select_back$') # 🚨 ပြင်ဆင်ချက်
+                CallbackQueryHandler(back_to_coin_select, pattern='^coin_select_back$') 
             ],
             WAITING_FOR_RECEIPT: [
                 MessageHandler(filters.PHOTO | filters.TEXT, receive_receipt), 
-                CallbackQueryHandler(back_to_coin_select, pattern='^coin_select_back$') # 🚨 ပြင်ဆင်ချက်
+                CallbackQueryHandler(back_to_coin_select, pattern='^coin_select_back$') 
             ],
         },
         fallbacks=[
             CallbackQueryHandler(back_to_service_menu, pattern='^menu_back$'),
-            MessageHandler(filters.Text("💰 Payment Method"), handle_payment_method) # Reply Keyboard ကနေ ပြန်ဝင်လာရင်
+            MessageHandler(filters.Text("💰 Payment Method"), handle_payment_method) # Reply Keyboard မှ ပြန်လာလျှင် Conversation ပြန်စရန်
         ]
     )
     application.add_handler(payment_conv_handler)
