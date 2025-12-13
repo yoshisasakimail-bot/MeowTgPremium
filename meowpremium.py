@@ -32,7 +32,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------- ENV / Globals -----------------
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
+# MODIFIED: ADMIN_ID now primarily loaded from config sheet. Keep env variable as a fallback/initial default.
+ADMIN_ID_DEFAULT = 123456789
 SHEET_ID = os.environ.get("SHEET_ID", "")
 GSPREAD_SA_JSON = os.environ.get("GSPREAD_SA_JSON", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -315,6 +316,13 @@ PRODUCT_SELECTION_INLINE_KEYBOARD = InlineKeyboardMarkup(
     ]
 )
 
+# NEW: Reply keyboard for cancelling product purchase flow
+CANCEL_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("❌ Cancel Order")]],
+    resize_keyboard=True,
+    one_time_keyboard=True # Use one_time_keyboard for temporary keyboards
+)
+
 
 # ------------ Validation helpers ----------------
 PHONE_RE = re.compile(r"^\d{8,15}$")
@@ -487,7 +495,13 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     config = get_config_data()
-    admin_contact_id = int(os.environ.get("ADMIN_ID", ADMIN_ID))
+    # MODIFIED: Get ADMIN_ID from config data
+    try:
+        admin_contact_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
+    except ValueError:
+        logger.error("Admin ID in config is not an integer. Using default.")
+        admin_contact_id = ADMIN_ID_DEFAULT
+
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     receipt_meta = {
         "from_user_id": user.id,
@@ -569,11 +583,18 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         await query.message.reply_text("Invalid parameters.")
         return
 
-    if query.from_user.id != ADMIN_ID:
+    config = get_config_data()
+    # MODIFIED: Get ADMIN_ID from config data
+    try:
+        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
+    except ValueError:
+        admin_id = ADMIN_ID_DEFAULT
+
+    if query.from_user.id != admin_id:
         await query.message.reply_text("You are not authorized to perform this action.")
         return
 
-    config = get_config_data()
+    
     # ratio: mmk -> coins (user requested: 1 MMK = 0.5 coin)
     try:
         ratio = float(config.get("mmk_to_coins_ratio", "0.5"))
@@ -634,7 +655,14 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         await query.message.reply_text("Invalid user id.")
         return
 
-    if query.from_user.id != ADMIN_ID:
+    config = get_config_data()
+    # MODIFIED: Get ADMIN_ID from config data
+    try:
+        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
+    except ValueError:
+        admin_id = ADMIN_ID_DEFAULT
+
+    if query.from_user.id != admin_id:
         await query.message.reply_text("You are not authorized to perform this action.")
         return
 
@@ -696,17 +724,26 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     selected_key = query.data
     context.user_data["product_key"] = selected_key
+    
+    # MODIFIED: Added CANCEL_KEYBOARD
     try:
         await query.message.edit_text(
             f"You selected *{selected_key.replace('_',' ').upper()}*.\n"
             "Please send the **Telegram Phone Number** for the service (digits only).",
             parse_mode="Markdown",
         )
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="If you want to stop the order, click '❌ Cancel Order'.",
+            reply_markup=CANCEL_KEYBOARD
+        )
     except Exception:
+        # Fallback to reply if edit fails
         await query.message.reply_text(
             f"You selected *{selected_key.replace('_',' ').upper()}*.\n"
             "Please send the **Telegram Phone Number** for the service (digits only).",
             parse_mode="Markdown",
+            reply_markup=CANCEL_KEYBOARD # Include the keyboard in the fallback reply too
         )
     return WAITING_FOR_PHONE
 
@@ -715,12 +752,24 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
     text = (update.message.text or "").strip()
     if PHONE_RE.match(text):
         context.user_data["premium_phone"] = text
+        # MODIFIED: Added CANCEL_KEYBOARD
         await update.message.reply_text(
             f"Thank you. Now please send the **Telegram Username** associated with {text} (start with @ or plain username)."
+        )
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text="If you want to stop the order, click '❌ Cancel Order'.",
+            reply_markup=CANCEL_KEYBOARD
         )
         return WAITING_FOR_USERNAME
     else:
         await update.message.reply_text("❌ Invalid phone. Send digits only (8-15 digits).")
+        # Keep the cancel keyboard visible
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text="If you want to stop the order, click '❌ Cancel Order'.",
+            reply_markup=CANCEL_KEYBOARD
+        )
         return WAITING_FOR_PHONE
 
 
@@ -729,7 +778,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     user_id = user.id
 
     if is_user_banned(user_id):
-        await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
+        await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
     product_key = context.user_data.get("product_key")
@@ -737,20 +786,30 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     raw_username = (update.message.text or "").strip()
     premium_username = normalize_username(raw_username)
 
+    if not premium_username:
+        await update.message.reply_text("❌ Invalid username format. Please try again.")
+        # Keep the cancel keyboard visible
+        await context.bot.send_message(
+            chat_id=update.effective_user.id,
+            text="If you want to stop the order, click '❌ Cancel Order'.",
+            reply_markup=CANCEL_KEYBOARD
+        )
+        return WAITING_FOR_USERNAME
+
     if not product_key:
-        await update.message.reply_text("❌ No product selected. Please start again.")
+        await update.message.reply_text("❌ No product selected. Please start again.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
     config = get_config_data()
     price_mmk_str = config.get(product_key)
     if price_mmk_str is None:
-        await update.message.reply_text("❌ Price for this product not found in config.")
+        await update.message.reply_text("❌ Price for this product not found in config.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
     try:
         price_needed = int(price_mmk_str)
     except ValueError:
-        await update.message.reply_text("❌ Product price in config is invalid.")
+        await update.message.reply_text("❌ Product price in config is invalid.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
     user_data = get_user_data_from_sheet(user_id)
@@ -761,7 +820,8 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
     if user_coins < price_needed:
         await update.message.reply_text(
-            f"❌ Insufficient coin balance. You need {price_needed} but have {user_coins}. Use '💰 Payment Method' to top up."
+            f"❌ Insufficient coin balance. You need {price_needed} but have {user_coins}. Use '💰 Payment Method' to top up.",
+            reply_markup=MAIN_MENU_KEYBOARD
         )
         order = {
             "order_id": str(uuid.uuid4()),
@@ -780,7 +840,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     new_balance = user_coins - price_needed
     ok = update_user_balance(user_id, new_balance)
     if not ok:
-        await update.message.reply_text("❌ Failed to deduct coins. Please contact admin.")
+        await update.message.reply_text("❌ Failed to deduct coins. Please contact admin.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
     order = {
@@ -795,10 +855,19 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         "notes": "Order placed and coins deducted.",
     }
     log_order(order)
+    
+    config = get_config_data()
+    # MODIFIED: Get ADMIN_ID from config data
+    try:
+        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
+    except ValueError:
+        admin_id = ADMIN_ID_DEFAULT
+
 
     await update.message.reply_text(
         f"✅ Order successful! {price_needed} Coins have been deducted for {product_key.replace('_',' ').upper()}.\n"
-        f"New balance: {new_balance} Coins. Please wait while service is processed."
+        f"New balance: {new_balance} Coins. Please wait while service is processed.",
+        reply_markup=MAIN_MENU_KEYBOARD # Show main menu keyboard on success
     )
     try:
         admin_msg = (
@@ -810,12 +879,19 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
             f"Phone: {premium_phone}\n"
             f"Username: {premium_username}\n"
         )
-        await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg)
+        await context.bot.send_message(chat_id=admin_id, text=admin_msg)
     except Exception as e:
         logger.error("Failed to notify admin about order: %s", e)
 
     return ConversationHandler.END
 
+# NEW: Handler to cancel the product purchase conversation
+async def cancel_product_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "❌ Order cancelled. You have returned to the main menu.",
+        reply_markup=MAIN_MENU_KEYBOARD
+    )
+    return ConversationHandler.END
 
 # MODIFIED: Global back to service menu (menu_back) now only returns to the main Reply Keyboard
 async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -842,8 +918,15 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # Admin commands (ban/unban) - Unchanged
 async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config = get_config_data()
+    # MODIFIED: Get ADMIN_ID from config data
+    try:
+        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
+    except ValueError:
+        admin_id = ADMIN_ID_DEFAULT
+
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if user.id != admin_id:
         await update.message.reply_text("You are not authorized.")
         return
     args = context.args
@@ -863,8 +946,15 @@ async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config = get_config_data()
+    # MODIFIED: Get ADMIN_ID from config data
+    try:
+        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
+    except ValueError:
+        admin_id = ADMIN_ID_DEFAULT
+
     user = update.effective_user
-    if user.id != ADMIN_ID:
+    if user.id != admin_id:
         await update.message.reply_text("You are not authorized.")
         return
     args = context.args
@@ -888,9 +978,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     err_type = type(context.error).__name__ if context.error else "UnknownError"
     err_msg = str(context.error)[:1000] if context.error else "No details"
     logger.error("Exception while handling an update: %s: %s", err_type, err_msg)
+    
+    config = get_config_data()
+    # MODIFIED: Get ADMIN_ID from config data
+    try:
+        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
+    except ValueError:
+        admin_id = ADMIN_ID_DEFAULT
+
     try:
         await context.bot.send_message(
-            chat_id=ADMIN_ID,
+            chat_id=admin_id,
             text=f"🚨 Bot Error: {err_type}\n{err_msg}",
         )
     except Exception:
@@ -907,11 +1005,21 @@ def main():
     if not BOT_TOKEN:
         logger.error("Missing BOT_TOKEN environment variable.")
         return
+    
+    # MODIFIED: Check if ADMIN_ID is set in config (optional, but good practice)
+    config_data = get_config_data(force_refresh=True)
+    if not config_data.get("admin_contact_id"):
+        logger.warning(
+            "admin_contact_id not found in config sheet. Using default ADMIN_ID: %s. "
+            "Please ensure 'admin_contact_id' is set in the 'config' sheet.", 
+            ADMIN_ID_DEFAULT
+        )
 
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Command handlers
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("cancel", cancel_product_order)) # NEW: Handle /cancel command
 
     # Admin commands
     application.add_handler(CommandHandler("ban", admin_ban_user))
@@ -946,10 +1054,19 @@ def main():
                 CallbackQueryHandler(select_product_price, pattern=r"^(star_|premium_).*"),
                 CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"),
             ],
-            WAITING_FOR_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, validate_phone_and_ask_username)],
-            WAITING_FOR_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_product_order)],
+            WAITING_FOR_PHONE: [
+                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order), # NEW: Cancel button handler
+                MessageHandler(filters.TEXT & ~filters.COMMAND, validate_phone_and_ask_username)
+            ],
+            WAITING_FOR_USERNAME: [
+                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order), # NEW: Cancel button handler
+                MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_product_order)
+            ],
         },
-        fallbacks=[CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$")],
+        fallbacks=[
+            CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"),
+            MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order) # NEW: Fallback for cancel
+        ],
         allow_reentry=True,
     )
     application.add_handler(product_purchase_handler)
