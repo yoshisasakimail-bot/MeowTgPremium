@@ -14,7 +14,7 @@ from telegram import (
     InlineKeyboardButton,
     KeyboardButton,
     ReplyKeyboardMarkup,
-    ChatAction, # <<< Added ChatAction for loading style and fixes potential ImportError
+    ChatAction, # <<< ADDED: To fix the ImportError and enable typing indicator
 )
 from telegram.ext import (
     Application,
@@ -372,21 +372,21 @@ async def show_product_selection_menu(update: Update, context: ContextTypes.DEFA
         await update.message.reply_text("❌ Your account has been banned.")
         return
 
-    # Use REDUCED_MENU_KEYBOARD when entering sub-menus
+    # Set to REDUCED_MENU_KEYBOARD when entering sub-menus
     await update.message.reply_text(
-        "✨ Select the service you wish to purchase:", 
-        reply_markup=REDUCED_MENU_KEYBOARD
+        "Loading Services...", reply_markup=REDUCED_MENU_KEYBOARD
     )
+    
     # Send the inline keyboard for products and Help Center
     help_center_button = InlineKeyboardButton("❓ Help Center", callback_data="help_center")
     product_selection_with_help = InlineKeyboardMarkup(PRODUCT_SELECTION_INLINE_KEYBOARD.inline_keyboard + [[help_center_button]])
     
+    # Use reply_text instead of edit_text since we are replying to the reply button click
     await update.message.reply_text(
-        "Available Services:", 
+        "✨ Select the service you wish to purchase:", 
         reply_markup=product_selection_with_help
     )
-
-
+    
 # Function to handle Reply Keyboard selections for User Info, Payment Method, Help Center
 async def handle_reply_key_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, next_handler):
     user = update.effective_user
@@ -397,7 +397,7 @@ async def handle_reply_key_entry(update: Update, context: ContextTypes.DEFAULT_T
     # 1. Loading Style
     await context.bot.send_chat_action(chat_id=user.id, action=ChatAction.TYPING)
     
-    # 2. Change to Reduced Menu Keyboard
+    # 2. Change to Reduced Menu Keyboard (This ensures the keyboard switches)
     await update.message.reply_text("Loading...", reply_markup=REDUCED_MENU_KEYBOARD)
 
     # 3. Call the actual content handler
@@ -416,6 +416,7 @@ async def handle_user_info_content(update: Update, context: ContextTypes.DEFAULT
         f"🔸 **Registered Since:** {data.get('registration_date')}\n"
         f"🔸 **Banned:** {data.get('banned')}\n"
     )
+    # The back button will revert to the FULL_MENU_KEYBOARD
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_full_menu")]])
     await update.message.reply_text(info_text, reply_markup=back_keyboard, parse_mode="Markdown")
 
@@ -429,8 +430,14 @@ async def handle_help_center_content(update: Update, context: ContextTypes.DEFAU
         f"For assistance, contact the administrator:\nAdmin Contact: **{admin_username}**\n\n"
         "We will respond as soon as possible."
     )
+    # The back button will revert to the FULL_MENU_KEYBOARD
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_full_menu")]])
-    await update.message.reply_text(help_text, reply_markup=back_keyboard, parse_mode="Markdown")
+    
+    # Handle both message and callback query entry points
+    if update.callback_query:
+        await update.callback_query.message.reply_text(help_text, reply_markup=back_keyboard, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(help_text, reply_markup=back_keyboard, parse_mode="Markdown")
 
 
 # ----------- Payment Flow (Coin Purchase) -----------
@@ -449,16 +456,14 @@ async def handle_payment_method_entry(update: Update, context: ContextTypes.DEFA
     await update.message.reply_text("Loading...", reply_markup=REDUCED_MENU_KEYBOARD)
 
     # 3. Proceed to conversation start (show packages)
-    # This acts as the entry_points for the ConversationHandler
     await update.message.reply_text("💰 Select Coin Package:", reply_markup=get_coin_package_keyboard())
     return SELECT_COIN_PACKAGE
 
 
 async def handle_coin_package_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer(text="Loading payment methods...") # Loading style
+    await query.answer(text="Loading payment methods...") 
     
-    # callback data format: buycoin_<coins>_<mmk>
     parts = query.data.split("_")
     try:
         coins = int(parts[1])
@@ -466,9 +471,9 @@ async def handle_coin_package_select(update: Update, context: ContextTypes.DEFAU
     except Exception:
         await query.message.reply_text("Invalid package selected.")
         return ConversationHandler.END
-    # store package selection
+        
     context.user_data["selected_coinpkg"] = {"coins": coins, "mmk": mmk}
-    # Then show payment method buttons
+    
     await query.message.edit_text(
         f"💳 You selected **{coins} Coins — {mmk} MMK**.\nPlease choose payment method:",
         reply_markup=get_payment_keyboard(),
@@ -479,17 +484,18 @@ async def handle_coin_package_select(update: Update, context: ContextTypes.DEFAU
 
 async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer(text="Generating transfer details...") # Loading style
-    cd = query.data  # e.g., pay_kpay
+    await query.answer(text="Generating transfer details...") 
+    cd = query.data  
     parts = cd.split("_")
     if len(parts) < 2:
         await query.message.reply_text("Invalid payment method selected.")
         return ConversationHandler.END
+        
     payment_method = parts[1]
     config = get_config_data()
     admin_name = config.get(f"{payment_method}_name", "Admin Name")
     phone_number = config.get(f"{payment_method}_phone", "09XXXXXXXXX")
-    # Show selected package summary if exists
+    
     pkg = context.user_data.get("selected_coinpkg")
     pkg_text = ""
     if pkg:
@@ -501,7 +507,7 @@ async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Phone Number: **{phone_number}**\n\n"
         "Please *send the receipt (screenshot or text)* here after transfer. If amount is visible, bot will try to detect it automatically."
     )
-    # The back button here should go back to payment method selection (Kpay/Wave)
+    # The back button here goes back to payment method selection (Kpay/Wave)
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Payment Method Selection", callback_data="payment_back_to_method")]])
     await query.message.edit_text(transfer_text, reply_markup=back_keyboard, parse_mode="Markdown")
     return WAITING_FOR_RECEIPT
@@ -512,8 +518,8 @@ async def back_to_payment_method(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     pkg = context.user_data.get("selected_coinpkg")
     if not pkg:
-        await query.message.reply_text("Package data lost. Starting over.")
-        return await handle_payment_method_entry(update, context) # Restart flow
+        # If package data lost, go back to package selection
+        return await back_to_package_selection(update, context) 
 
     await query.message.edit_text(
         f"💳 You selected **{pkg['coins']} Coins — {pkg['mmk']} MMK**.\nPlease choose payment method:",
@@ -610,6 +616,7 @@ async def back_to_full_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     # Edit the message to show the Full Menu keyboard
+    # Use reply_text instead of edit_text to ensure the reply keyboard appears correctly
     await query.message.reply_text("⬅️ Back to Main Menu. Choose an option below:", reply_markup=FULL_MENU_KEYBOARD)
     return ConversationHandler.END
 
@@ -634,33 +641,18 @@ async def back_to_product_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     product_selection_with_help = InlineKeyboardMarkup(PRODUCT_SELECTION_INLINE_KEYBOARD.inline_keyboard + [[help_center_button]])
     
     await query.message.edit_text(
-        "Available Services:", 
+        "✨ Select the service you wish to purchase:", 
         reply_markup=product_selection_with_help
     )
     # The conversation handler for products is active, so we stay in SELECT_PRODUCT_PRICE state
     return SELECT_PRODUCT_PRICE 
 
 
-# Global back to service menu (used by product fallback, keeps REDUCED_MENU)
-async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    help_center_button = InlineKeyboardButton("❓ Help Center", callback_data="help_center")
-    product_selection_with_help = InlineKeyboardMarkup(PRODUCT_SELECTION_INLINE_KEYBOARD.inline_keyboard + [[help_center_button]])
-    
-    await query.message.edit_text(
-        "Available Services:", 
-        reply_markup=product_selection_with_help
-    )
-    return SELECT_PRODUCT_PRICE # Re-enter selection state
-
-
 # --- Product Purchase Handlers (Modified for Reduced Keyboard and Loading) ---
 
 async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer(text="Loading product list...") # Loading style
+    await query.answer(text="Loading product list...") 
     
     parts = query.data.split("_")
     if len(parts) < 2:
@@ -671,8 +663,6 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["product_type"] = product_type
     keyboard = get_product_keyboard(product_type)
     
-    # The Reply Keyboard is already REDUCED by show_product_selection_menu
-    
     try:
         await query.message.edit_text(
             f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
@@ -680,6 +670,7 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode="Markdown",
         )
     except Exception:
+        # Fallback if the message cannot be edited (e.g., if it's the very first message)
         await query.message.reply_text(
             f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
             reply_markup=keyboard,
@@ -690,7 +681,7 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
 
 async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer(text="Proceeding to contact details...") # Loading style
+    await query.answer(text="Proceeding to contact details...") 
     selected_key = query.data
     context.user_data["product_key"] = selected_key
     
@@ -698,7 +689,9 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await query.message.delete() 
     except Exception:
-        pass # Ignore if deletion fails
+        pass 
+
+    await context.bot.send_chat_action(chat_id=query.from_user.id, action=ChatAction.TYPING)
 
     await query.message.reply_text(
         f"You selected *{selected_key.replace('_',' ').upper()}*.\n"
@@ -860,6 +853,118 @@ async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"User {target} unbanned.")
     else:
         await update.message.reply_text("Failed to unban user.")
+        
+# Admin callbacks for receipts (Copy/Pasted from previous context - ensure this is the final version you want)
+async def admin_approve_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data  # admin_approve_receipt|<user_id>|<timestamp>|<amount>
+    parts = data.split("|")
+    if len(parts) < 4:
+        await query.message.reply_text("Invalid admin action.")
+        return
+
+    _, user_id_str, ts, amount_str = parts[0], parts[1], parts[2], parts[3]
+    try:
+        user_id = int(user_id_str)
+        approved_amount = int(amount_str)
+    except ValueError:
+        await query.message.reply_text("Invalid parameters.")
+        return
+
+    if query.from_user.id != ADMIN_ID:
+        await query.message.reply_text("You are not authorized to perform this action.")
+        return
+
+    config = get_config_data()
+    # ratio: mmk -> coins (user requested: 1 MMK = 0.5 coin)
+    try:
+        ratio = float(config.get("mmk_to_coins_ratio", "0.5"))
+    except Exception:
+        ratio = 0.5
+    coins_to_add = int(approved_amount * ratio)
+
+    user_data = get_user_data_from_sheet(user_id)
+    try:
+        current_coins = int(user_data.get("coin_balance", "0"))
+    except ValueError:
+        current_coins = 0
+    new_balance = current_coins + coins_to_add
+
+    ok = update_user_balance(user_id, new_balance)
+    if not ok:
+        await query.message.reply_text("Failed to update user balance in sheet.")
+        return
+
+    order = {
+        "order_id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "username": user_data.get("username", ""),
+        "product_key": "COIN_TOPUP",
+        "price_mmk": approved_amount,
+        "phone": "",
+        "premium_username": "",
+        "status": "APPROVED_RECEIPT",
+        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "notes": f"Receipt approved by admin {query.from_user.id} at {ts}",
+        "processed_by": str(query.from_user.id),
+    }
+    log_order(order)
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ Your payment of {approved_amount} MMK has been approved by admin. {coins_to_add} Coins added. New balance: {new_balance} Coins.",
+        )
+        await query.message.reply_text("✅ Approved and user balance updated.")
+    except Exception as e:
+        logger.error("Failed to notify user after approval: %s", e)
+        await query.message.reply_text("Approved but failed to notify user.")
+
+
+async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    parts = data.split("|")
+    if len(parts) < 3:
+        await query.message.reply_text("Invalid admin action.")
+        return
+    _, user_id_str, ts = parts
+    try:
+        user_id = int(user_id_str)
+    except ValueError:
+        await query.message.reply_text("Invalid user id.")
+        return
+
+    if query.from_user.id != ADMIN_ID:
+        await query.message.reply_text("You are not authorized to perform this action.")
+        return
+
+    order = {
+        "order_id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "username": get_user_data_from_sheet(user_id).get("username", ""),
+        "product_key": "COIN_TOPUP",
+        "price_mmk": 0,
+        "phone": "",
+        "premium_username": "",
+        "status": "DENIED_RECEIPT",
+        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "notes": f"Receipt denied by admin {query.from_user.id} at {ts}",
+        "processed_by": str(query.from_user.id),
+    }
+    log_order(order)
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ Admin has denied your payment/receipt. Please contact support or retry the payment.",
+        )
+        await query.message.reply_text("❌ Denied and user notified.")
+    except Exception as e:
+        logger.error("Failed to notify user after denial: %s", e)
+        await query.message.reply_text("Denied but failed to notify user.")
 
 
 # Error handler (sanitized)
@@ -898,27 +1003,29 @@ def main():
 
     # Payment Conversation Handler (entry: Payment Method button)
     payment_conv_handler = ConversationHandler(
+        # Entry point: Reply button '💰 Payment Method'
         entry_points=[MessageHandler(filters.Text("💰 Payment Method"), handle_payment_method_entry)],
         states={
             SELECT_COIN_PACKAGE: [
                 CallbackQueryHandler(handle_coin_package_select, pattern=r"^buycoin_"),
-                CallbackQueryHandler(payment_conv_back_to_full, pattern=r"^payment_conv_back_to_full$"), # Back from packages
+                CallbackQueryHandler(payment_conv_back_to_full, pattern=r"^payment_conv_back_to_full$"), # Back from packages -> Full Menu
             ],
             CHOOSING_PAYMENT_METHOD: [
                 CallbackQueryHandler(start_payment_conv, pattern=r"^pay_"),
-                CallbackQueryHandler(back_to_package_selection, pattern=r"^payment_back_to_package$"), # Back from Kpay/Wave to packages
+                CallbackQueryHandler(back_to_package_selection, pattern=r"^payment_back_to_package$"), # Back from Kpay/Wave -> packages
             ],
             WAITING_FOR_RECEIPT: [
                 MessageHandler(filters.PHOTO | filters.TEXT, receive_receipt),
-                CallbackQueryHandler(back_to_payment_method, pattern=r"^payment_back_to_method$"), # Back from transfer details to Kpay/Wave
+                CallbackQueryHandler(back_to_payment_method, pattern=r"^payment_back_to_method$"), # Back from transfer details -> Kpay/Wave
             ],
         },
-        fallbacks=[MessageHandler(filters.Regex(r"^(👤 User Info|❓ Help Center|✨ Premium & Star Services)$"), lambda u, c: ConversationHandler.END)],
+        # Fallbacks: Return to Full Menu if conversation is interrupted
+        fallbacks=[CallbackQueryHandler(payment_conv_back_to_full, pattern=r"^payment_conv_back_to_full$")],
         allow_reentry=True,
     )
     application.add_handler(payment_conv_handler)
 
-    # Product Conversation Handler
+    # Product Conversation Handler (entry: Reply button '✨ Premium & Star Services')
     product_purchase_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("✨ Premium & Star Services"), show_product_selection_menu)],
         states={
@@ -936,20 +1043,18 @@ def main():
     application.add_handler(product_purchase_handler)
 
     # Message handlers for reply keyboard (handle_reply_key_entry redirects to content handler)
+    # The helper function ensures the REDUCED_MENU is set and loading is shown.
     application.add_handler(MessageHandler(filters.Text("👤 User Info"), lambda u, c: handle_reply_key_entry(u, c, handle_user_info_content)))
-    # '💰 Payment Method' is handled by payment_conv_handler entry_points
     application.add_handler(MessageHandler(filters.Text("❓ Help Center"), lambda u, c: handle_reply_key_entry(u, c, handle_help_center_content)))
-    application.add_handler(MessageHandler(filters.Text("✨ Premium & Star Services"), show_product_selection_menu))
 
 
     # Inline callbacks for Help Center (from the Inline Menu) and general Back button
-    application.add_handler(CallbackQueryHandler(handle_help_center_content, pattern=r"^help_center$"))
+    application.add_handler(CallbackQueryHandler(handle_help_center_content, pattern=r"^help_center$")) # Handled by content handler now
     application.add_handler(CallbackQueryHandler(back_to_full_menu, pattern=r"^back_to_full_menu$"))
 
     # Admin callback handlers for approve/deny
     application.add_handler(CallbackQueryHandler(admin_approve_receipt_callback, pattern=r"^admin_approve_receipt\|"))
     application.add_handler(CallbackQueryHandler(admin_deny_receipt_callback, pattern=r"^admin_deny_receipt\|"))
-
 
     # Global error handler
     application.add_error_handler(error_handler)
