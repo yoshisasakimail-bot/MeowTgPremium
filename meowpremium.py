@@ -298,7 +298,7 @@ def get_coin_package_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-# MODIFIED: Reply keyboard now includes the new "Premium & Star" button
+# MODIFIED: Reply keyboard now includes the new "Premium & Star" and "Help Center" button
 ENGLISH_REPLY_KEYBOARD = [
     [KeyboardButton("👤 User Info"), KeyboardButton("💰 Payment Method")],
     [KeyboardButton("❓ Help Center"), KeyboardButton("✨ Premium & Star")] # Added new button
@@ -399,9 +399,10 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Use menu_back to return to the main menu (no inline service menu here)
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]])
     if update.callback_query:
-        # Should not be reached with the current flow
+        # If triggered from a previous inline keyboard (which shouldn't happen now), reply.
         await update.callback_query.message.reply_text(help_text, reply_markup=back_keyboard, parse_mode="Markdown")
     else:
+        # Primary entry point from the reply button
         await update.message.reply_text(help_text, reply_markup=back_keyboard, parse_mode="Markdown")
 
 
@@ -512,9 +513,12 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amounts_cfg = config.get("receipt_approve_amounts", "")
         if amounts_cfg:
             try:
+                # ဤနေရာတွင် စာလုံးမှားယွင်းပါက ValueError တက်ပါသည်။
                 choices = [int(x.strip()) for x in amounts_cfg.split(",") if x.strip().isdigit()]
             except Exception:
-                choices = []
+                # Configuration မှားယွင်းပါက Default သို့ ပြန်သွားပါမည်။
+                choices = [2000, 4000, 10000, 20000]
+
         else:
             choices = [2000, 4000, 10000, 20000]
 
@@ -538,8 +542,9 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(kb_rows),
         )
     except Exception as e:
-        logger.error("Failed to forward receipt to admin: %s", e)
-        await update.message.reply_text("❌ Could not forward receipt to admin. Please try again later.")
+        # Error တက်ပါက Bot မှ Admin သို့ Approval Button များပို့ရန် မအောင်မြင်ပါ။
+        logger.error("Failed to send receipt buttons to admin: %s", e)
+        await update.message.reply_text("❌ Could not forward receipt to admin. Please try again later. Please check your ADMIN_ID and Bot permissions.")
         return ConversationHandler.END
 
     await update.message.reply_text("💌 Receipt sent to Admin. You will be notified after approval.")
@@ -820,7 +825,7 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     welcome_text = "Welcome back to the main menu. Choose from the options below."
 
     # Use reply_text which sends a new message with the Reply Keyboard.
-    # The new Reply Keyboard contains "Premium & Star".
+    # The new Reply Keyboard contains "Premium & Star" and "Help Center".
     try:
         # Delete the previous inline message if possible
         await query.message.delete()
@@ -912,7 +917,7 @@ def main():
     application.add_handler(CommandHandler("ban", admin_ban_user))
     application.add_handler(CommandHandler("unban", admin_unban_user))
 
-    # Payment Conversation Handler (entry: Payment Method button) - Unchanged entry
+    # Payment Conversation Handler (entry: Payment Method button)
     payment_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("💰 Payment Method"), handle_payment_method)],
         states={
@@ -933,7 +938,7 @@ def main():
     )
     application.add_handler(payment_conv_handler)
 
-    # Product Conversation Handler (entry: Inline buttons) - Unchanged entry, but flow modified
+    # Product Conversation Handler (entry: Inline buttons)
     product_purchase_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_product_purchase, pattern=r"^product_")],
         states={
