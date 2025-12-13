@@ -32,8 +32,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------- ENV / Globals -----------------
-# MODIFIED: ADMIN_ID now primarily loaded from config sheet. Keep env variable as a fallback/initial default.
+# MODIFIED: Define ADMIN_ID_DEFAULT for explicit fallback
 ADMIN_ID_DEFAULT = 123456789
+ADMIN_ID = int(os.environ.get("ADMIN_ID", ADMIN_ID_DEFAULT)) # Keep ADMIN_ID as the initial default/fallback from ENV
 SHEET_ID = os.environ.get("SHEET_ID", "")
 GSPREAD_SA_JSON = os.environ.get("GSPREAD_SA_JSON", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -121,6 +122,18 @@ def get_config_data(force_refresh: bool = False) -> Dict[str, str]:
         CONFIG_CACHE["data"] = _read_config_sheet()
         CONFIG_CACHE["ts"] = now
     return CONFIG_CACHE["data"]
+
+
+# NEW Helper: Get Admin ID from config sheet, falling back to global default
+def get_dynamic_admin_id(config: Dict) -> int:
+    """Retrieves ADMIN_ID from config sheet, falls back to global ADMIN_ID."""
+    try:
+        # Try to get from config sheet, fallback to global ADMIN_ID (which is 123456789 or from Render ENV)
+        return int(config.get("admin_contact_id", ADMIN_ID))
+    except (ValueError, TypeError):
+        # If the value in the sheet is not a valid integer, use the global default
+        logger.warning("admin_contact_id in sheet is invalid or missing. Using fallback: %s", ADMIN_ID)
+        return ADMIN_ID
 
 
 # ------------ User data helpers ----------------
@@ -495,13 +508,9 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data
-    try:
-        admin_contact_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
-    except ValueError:
-        logger.error("Admin ID in config is not an integer. Using default.")
-        admin_contact_id = ADMIN_ID_DEFAULT
-
+    # BUG FIX: Get Admin ID from config data, falling back to global ADMIN_ID
+    admin_contact_id = get_dynamic_admin_id(config)
+    
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     receipt_meta = {
         "from_user_id": user.id,
@@ -584,13 +593,10 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         return
 
     config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data
-    try:
-        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
-    except ValueError:
-        admin_id = ADMIN_ID_DEFAULT
-
-    if query.from_user.id != admin_id:
+    # MODIFIED: Get ADMIN_ID from config data for authorization check
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    if query.from_user.id != admin_id_check:
         await query.message.reply_text("You are not authorized to perform this action.")
         return
 
@@ -656,13 +662,10 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         return
 
     config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data
-    try:
-        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
-    except ValueError:
-        admin_id = ADMIN_ID_DEFAULT
+    # MODIFIED: Get ADMIN_ID from config data for authorization check
+    admin_id_check = get_dynamic_admin_id(config)
 
-    if query.from_user.id != admin_id:
+    if query.from_user.id != admin_id_check:
         await query.message.reply_text("You are not authorized to perform this action.")
         return
 
@@ -692,7 +695,7 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         await query.message.reply_text("Denied but failed to notify user.")
 
 
-# ----------- Product purchase flow (unchanged) -----------
+# ----------- Product purchase flow (NEW CANCEL BUTTONS ADDED) -----------
 async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -725,26 +728,26 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     selected_key = query.data
     context.user_data["product_key"] = selected_key
     
-    # MODIFIED: Added CANCEL_KEYBOARD
+    # NEW: Send the initial message without the keyboard, then send the keyboard as a new message
     try:
         await query.message.edit_text(
             f"You selected *{selected_key.replace('_',' ').upper()}*.\n"
             "Please send the **Telegram Phone Number** for the service (digits only).",
             parse_mode="Markdown",
         )
-        await context.bot.send_message(
-            chat_id=query.from_user.id,
-            text="If you want to stop the order, click '❌ Cancel Order'.",
-            reply_markup=CANCEL_KEYBOARD
-        )
     except Exception:
-        # Fallback to reply if edit fails
         await query.message.reply_text(
             f"You selected *{selected_key.replace('_',' ').upper()}*.\n"
             "Please send the **Telegram Phone Number** for the service (digits only).",
             parse_mode="Markdown",
-            reply_markup=CANCEL_KEYBOARD # Include the keyboard in the fallback reply too
         )
+        
+    # NEW: Send the cancel keyboard to the user
+    await context.bot.send_message(
+        chat_id=query.from_user.id,
+        text="If you want to stop the order, click '❌ Cancel Order'.",
+        reply_markup=CANCEL_KEYBOARD
+    )
     return WAITING_FOR_PHONE
 
 
@@ -752,10 +755,10 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
     text = (update.message.text or "").strip()
     if PHONE_RE.match(text):
         context.user_data["premium_phone"] = text
-        # MODIFIED: Added CANCEL_KEYBOARD
         await update.message.reply_text(
             f"Thank you. Now please send the **Telegram Username** associated with {text} (start with @ or plain username)."
         )
+        # NEW: Send the cancel keyboard again
         await context.bot.send_message(
             chat_id=update.effective_user.id,
             text="If you want to stop the order, click '❌ Cancel Order'.",
@@ -858,10 +861,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     
     config = get_config_data()
     # MODIFIED: Get ADMIN_ID from config data
-    try:
-        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
-    except ValueError:
-        admin_id = ADMIN_ID_DEFAULT
+    admin_id_check = get_dynamic_admin_id(config)
 
 
     await update.message.reply_text(
@@ -879,7 +879,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
             f"Phone: {premium_phone}\n"
             f"Username: {premium_username}\n"
         )
-        await context.bot.send_message(chat_id=admin_id, text=admin_msg)
+        await context.bot.send_message(chat_id=admin_id_check, text=admin_msg)
     except Exception as e:
         logger.error("Failed to notify admin about order: %s", e)
 
@@ -892,6 +892,7 @@ async def cancel_product_order(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=MAIN_MENU_KEYBOARD
     )
     return ConversationHandler.END
+
 
 # MODIFIED: Global back to service menu (menu_back) now only returns to the main Reply Keyboard
 async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -916,17 +917,13 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END # Exit any active conversation state
 
 
-# Admin commands (ban/unban) - Unchanged
+# Admin commands (ban/unban) - Updated to use config ID
 async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data
-    try:
-        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
-    except ValueError:
-        admin_id = ADMIN_ID_DEFAULT
-
+    admin_id_check = get_dynamic_admin_id(config)
+    
     user = update.effective_user
-    if user.id != admin_id:
+    if user.id != admin_id_check:
         await update.message.reply_text("You are not authorized.")
         return
     args = context.args
@@ -947,14 +944,10 @@ async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data
-    try:
-        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
-    except ValueError:
-        admin_id = ADMIN_ID_DEFAULT
-
+    admin_id_check = get_dynamic_admin_id(config)
+    
     user = update.effective_user
-    if user.id != admin_id:
+    if user.id != admin_id_check:
         await update.message.reply_text("You are not authorized.")
         return
     args = context.args
@@ -973,22 +966,18 @@ async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Failed to unban user.")
 
 
-# Error handler (sanitized) - Unchanged
+# Error handler (sanitized) - Updated to use config ID
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err_type = type(context.error).__name__ if context.error else "UnknownError"
     err_msg = str(context.error)[:1000] if context.error else "No details"
     logger.error("Exception while handling an update: %s: %s", err_type, err_msg)
     
     config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data
-    try:
-        admin_id = int(config.get("admin_contact_id", ADMIN_ID_DEFAULT))
-    except ValueError:
-        admin_id = ADMIN_ID_DEFAULT
+    admin_id_check = get_dynamic_admin_id(config)
 
     try:
         await context.bot.send_message(
-            chat_id=admin_id,
+            chat_id=admin_id_check,
             text=f"🚨 Bot Error: {err_type}\n{err_msg}",
         )
     except Exception:
@@ -1005,15 +994,6 @@ def main():
     if not BOT_TOKEN:
         logger.error("Missing BOT_TOKEN environment variable.")
         return
-    
-    # MODIFIED: Check if ADMIN_ID is set in config (optional, but good practice)
-    config_data = get_config_data(force_refresh=True)
-    if not config_data.get("admin_contact_id"):
-        logger.warning(
-            "admin_contact_id not found in config sheet. Using default ADMIN_ID: %s. "
-            "Please ensure 'admin_contact_id' is set in the 'config' sheet.", 
-            ADMIN_ID_DEFAULT
-        )
 
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -1063,9 +1043,10 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_product_order)
             ],
         },
+        # NEW: Added MessageHandler for "❌ Cancel Order" to catch button press in all states
         fallbacks=[
             CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"),
-            MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order) # NEW: Fallback for cancel
+            MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order) 
         ],
         allow_reentry=True,
     )
