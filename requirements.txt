@@ -4,3 +4,5 @@ gspread-asyncio
 google-auth
 google-auth-oauthlib
 requests
+google-cloud-vision
+ision
