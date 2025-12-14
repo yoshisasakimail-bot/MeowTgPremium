@@ -5,9 +5,9 @@ import json
 import datetime
 import re
 import uuid
-import asyncio # NEW: Added for Broadcast delay
 from typing import Dict, Optional
 import gspread
+from google.auth.transport.requests import Request
 from telegram import (
     Update,
     InlineKeyboardMarkup,
@@ -59,10 +59,10 @@ CONFIG_TTL_SECONDS = int(os.environ.get("CONFIG_TTL_SECONDS", "25"))
     WAITING_FOR_PHONE,
     WAITING_FOR_USERNAME,
     SELECT_COIN_PACKAGE,
-    # NEW: Admin Broadcast States
-    BROADCAST_WAITING_FOR_CONTENT, 
-    BROADCAST_CONFIRMATION,
-) = range(8) # MODIFIED: Changed range from 6 to 8
+) = range(6)
+
+# NEW: States for Cash Control Conversation (START at 30)
+AWAIT_CASH_CONTROL_ID, AWAIT_CASH_CONTROL_AMOUNT = range(30, 32)
 
 
 # ------------ Helper: Retry wrapper for sheet init ----------------
@@ -138,43 +138,6 @@ def get_dynamic_admin_id(config: Dict) -> int:
         # If the value in the sheet is not a valid integer, use the global default
         logger.warning("admin_contact_id in sheet is invalid or missing. Using fallback: %s", ADMIN_ID)
         return ADMIN_ID
-
-
-# NEW: Helper to check the current bot status from config sheet
-def is_bot_closed():
-    config = get_config_data()
-    # Default to 'active' if key not found
-    return config.get('bot_status', 'active').lower() == 'closed'
-
-# NEW: Helper to update the bot status in the config sheet
-def set_bot_status(status: str) -> bool:
-    global WS_CONFIG, CONFIG_CACHE
-    try:
-        if WS_CONFIG is None:
-            logger.error("WS_CONFIG is not initialized in set_bot_status.")
-            return False
-        
-        # We need to find the 'bot_status' row and update its value
-        records = WS_CONFIG.get_all_records()
-        
-        # Look for existing 'bot_status' key
-        for i, record in enumerate(records):
-            if record.get("key") == "bot_status":
-                # Row index in gspread is 1-based, plus header row (i+2)
-                WS_CONFIG.update_cell(i + 2, 2, status.lower()) 
-                # After updating, clear the cache
-                CONFIG_CACHE = {"data": {}, "ts": 0}
-                return True
-        
-        # If 'bot_status' key doesn't exist, append a new row
-        WS_CONFIG.append_row(["bot_status", status.lower()])
-        # After appending, clear the cache
-        CONFIG_CACHE = {"data": {}, "ts": 0}
-        return True
-
-    except Exception as e:
-        logger.error("Failed to update bot status in config sheet: %s", e)
-        return False
 
 
 # ------------ User data helpers ----------------
@@ -395,13 +358,18 @@ ENGLISH_REPLY_KEYBOARD = [
 ]
 MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(ENGLISH_REPLY_KEYBOARD, resize_keyboard=True, one_time_keyboard=False)
 
-# NEW: Admin Only Reply Keyboard
-ADMIN_REPLY_KEYBOARD = [
-    [KeyboardButton("👤 User Info"), KeyboardButton("💰 Payment Method")],
-    [KeyboardButton("❓ Help Center"), KeyboardButton("✨ Premium & Star")],
-    [KeyboardButton("👾 Broadcast"), KeyboardButton("⚙️ Close to Selling")] # Added Broadcast and Close to Selling
-]
-ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(ADMIN_REPLY_KEYBOARD, resize_keyboard=True, one_time_keyboard=False)
+# NEW: Admin Only Reply Keyboard (Including all new buttons)
+ADMIN_REPLY_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("👤 User Info"), KeyboardButton("💰 Payment Method")],
+        [KeyboardButton("❓ Help Center"), KeyboardButton("✨ Premium & Star")],
+        [KeyboardButton("👾 Broadcast"), KeyboardButton("⚙️ Close to Selling")],
+        [KeyboardButton("📝 Cash Control"), KeyboardButton("👤 User Search")],
+        [KeyboardButton("🔄 Refresh Config"), KeyboardButton("📊 Statistics")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False
+)
 
 
 # New inline keyboard for the service selection (only Star and Premium)
@@ -418,13 +386,6 @@ CANCEL_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("❌ Cancel Order")]],
     resize_keyboard=True,
     one_time_keyboard=True # Use one_time_keyboard for temporary keyboards
-)
-
-# NEW: Reply keyboard for cancelling Admin actions
-ADMIN_CANCEL_KEYBOARD = ReplyKeyboardMarkup(
-    [[KeyboardButton("❌ Cancel Admin Action")]],
-    resize_keyboard=True,
-    one_time_keyboard=True
 )
 
 
@@ -453,53 +414,37 @@ def parse_amount_from_text(text: str) -> Optional[int]:
 
 
 # ------------ Handlers ----------------
-# MODIFIED: start_command uses the new welcome message format and checks for admin and status
+# MODIFIED: start_command uses the new welcome message format AND checks for Admin status
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Global Bot Status Check
-    if is_bot_closed():
-        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
-                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
-                                        parse_mode="Markdown")
-        return
-
     user = update.effective_user
     register_user_if_not_exists(user.id, user.full_name)
     if is_user_banned(user.id):
         # Keep Burmese ban message as it is likely crucial for the audience
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားထားသည်။ Support ထံ ဆက်သွယ်ပါ။")
         return
-
+        
     config = get_config_data()
     admin_id_check = get_dynamic_admin_id(config)
     
-    # NEW: Admin Check
-    if user.id == admin_id_check:
-        reply_markup = ADMIN_MENU_KEYBOARD # Use Admin Keyboard
-        welcome_text = (
-            f"Hello, 👑**{user.full_name}**\n\n"
-            f"**ADMIN MODE ACTIVATED.**\n"
-            f"Use the menu below to manage or use commands like /ban, /unban."
-        )
-    else:
-        reply_markup = MAIN_MENU_KEYBOARD # Use User Keyboard
-        welcome_text = (
-            f"Hello, 👑**{user.full_name}**\n\n"
-            f"🧸Welcome — Meow Telegram Bot 🫶\n"
-            f"To make a purchase with excellent service and advanced functionality, choose from the menu below."
-        )
+    # Check if the user is the Admin from the config sheet
+    is_admin = (user.id == admin_id_check)
 
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+    # MODIFIED: Updated welcome message format
+    welcome_text = (
+        f"Hello, 👑**{user.full_name}**\n\n"
+        f"🧸Welcome — Meow Telegram Bot 🫶\n"
+        f"To make a purchase with excellent service and advanced functionality, choose from the menu below."
+    )
+    
+    # Use Admin Keyboard if the user is Admin, otherwise use the standard menu
+    keyboard_to_use = ADMIN_REPLY_KEYBOARD if is_admin else MAIN_MENU_KEYBOARD
+
+    # Send the main menu reply keyboard
+    await update.message.reply_text(welcome_text, reply_markup=keyboard_to_use, parse_mode="Markdown")
 
 
 # NEW: Function to display the Star/Premium inline buttons, triggered by the new Reply Button
 async def show_product_inline_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Global Bot Status Check
-    if is_bot_closed():
-        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
-                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
-                                        parse_mode="Markdown")
-        return ConversationHandler.END
-
     user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
@@ -513,13 +458,6 @@ async def show_product_inline_menu(update: Update, context: ContextTypes.DEFAULT
 
 # MODIFIED: Does not show service menu afterwards
 async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Global Bot Status Check
-    if is_bot_closed():
-        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
-                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
-                                        parse_mode="Markdown")
-        return
-        
     user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
@@ -540,13 +478,6 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # MODIFIED: Does not show service menu afterwards
 async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Global Bot Status Check
-    if is_bot_closed():
-        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
-                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
-                                        parse_mode="Markdown")
-        return
-
     config = get_config_data()
     admin_username = config.get("admin_contact_username", "@Admin")
     help_text = (
@@ -567,13 +498,6 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ----------- Payment Flow (coin package -> payment method -> receipt) -----------
 # MODIFIED: Entry point for conversation from the reply keyboard.
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # NEW: Global Bot Status Check
-    if is_bot_closed():
-        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
-                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
-                                        parse_mode="Markdown")
-        return ConversationHandler.END
-
     user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
@@ -688,7 +612,9 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amounts_cfg:
             try:
                 # ဤနေရာတွင် စာလုံးမှားယွင်းပါက ValueError တက်ပါသည်။
-                choices = [int(x.strip()) for x in amounts_cfg.split(",") if x.strip().isdigit()]
+                # FIX: Remove any potential non-digit/non-comma characters before split
+                clean_amounts_cfg = "".join(c for c in amounts_cfg if c.isdigit() or c == ',')
+                choices = [int(x.strip()) for x in clean_amounts_cfg.split(",") if x.strip() and x.strip().isdigit()]
             except Exception:
                 # Configuration မှားယွင်းပါက Default သို့ ပြန်သွားပါမည်။
                 choices = default_choices
@@ -708,7 +634,7 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = []
         for i, amt in enumerate(choices):
             # FIX: Use short prefix 'rpa' (Receipt Process Approve)
-            row.append(InlineKeyboardButton(f"✅ Approve {amt} MMK", callback_data=f"rpa|{user.id}|{short_ts}|{amt}"))
+            row.append(InlineKeyboardButton(f"✅ Approve {amt:,.0f} MMK", callback_data=f"rpa|{user.id}|{short_ts}|{amt}"))
             if len(row) == 2: # Keep two buttons per row as requested
                 kb_rows.append(row)
                 row = []
@@ -772,6 +698,8 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
     coins_to_add = int(approved_amount * ratio)
 
     user_data = get_user_data_from_sheet(user_id)
+    target_user_name = user_data.get("username", user_id)
+    
     try:
         # Coin Balance ကို fetch လုပ်ရာမှာ clean လုပ်ပြီးသားဖြစ်တဲ့အတွက်၊ ဒီနေရာမှာ မှန်ကန်စွာ ပေါင်းသွားပါပြီ။
         current_coins = int(user_data.get("coin_balance", "0"))
@@ -781,7 +709,7 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
 
     ok = update_user_balance(user_id, new_balance)
     if not ok:
-        await query.message.reply_text("Failed to update user balance in sheet.")
+        await query.message.edit_text("Failed to update user balance in sheet.")
         return
 
     order = {
@@ -799,45 +727,32 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
     }
     log_order(order)
     
-    # Get the user's username for the admin message
-    display_username = user_data.get("username", str(user_id))
-    # Prepend '@' if it's a valid username (not 'N/A' or just the user ID string)
-    if display_username != "N/A" and not str(user_id) in display_username:
-        display_username = f"@{display_username}"
-    # If still 'N/A', just use the user ID as a fallback
-    if display_username == "N/A":
-         display_username = f"id:{user_id}" 
+    # Get the username of the admin who processed the order
+    processed_by_username = f"@{query.from_user.username}" if query.from_user.username else f"(id:{query.from_user.id})"
+    
+    # NEW: Beautiful Admin Notification Message (As requested)
+    beautiful_message = (
+        f"✅ **APPROVED: {approved_amount:,.0f} MMK**\n\n"
+        f"💰 **Added {coins_to_add:,.0f} Coins** to user.\n\n"
+        f"♦️User: 🧸**{target_user_name}** (id:`{user_id}`)\n"
+        f"👾Processed by: **{processed_by_username}**\n"
+        f"👾Order ID: `{order['order_id']}`\n"
+        f"👾Time: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}`"
+    )
 
     try:
-        # User Notification (Request 3)
+        # User Notification
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"🎉Your balance {coins_to_add} coin top up Successful. New balance: {new_balance} Coins.",
+            text=f"🎉Your balance {coins_to_add:,.0f} coin top up Successful. New balance: {new_balance:,.0f} Coins.",
         )
         
-        # Admin Notification: Edit the original message to show 'Processed' status (NEW)
-        # --------------------------------------------------------------------------------
-        admin_username = query.from_user.username or "Admin"
-        
-        # Build the processed message
-        processed_msg = (
-            f"✅ **APPROVED: {approved_amount} MMK**\n"
-            f"💰 Added **{coins_to_add} Coins** to user.\n"
-            f"User: {display_username} (id:`{user_id}`)\n"
-            f"Processed by: @{admin_username} (id:`{query.from_user.id}`)\n"
-            f"Time: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
-        )
-        
-        # Edit the previous message
-        await query.message.edit_text(
-            text=processed_msg,
-            parse_mode="Markdown"
-        )
-        # --------------------------------------------------------------------------------
+        # Admin Notification: Edit the inline keyboard message to show the final result
+        await query.message.edit_text(beautiful_message, parse_mode="Markdown")
         
     except Exception as e:
-        logger.error("Failed to notify user or edit admin message after approval: %s", e)
-        await query.message.reply_text(f"Approved but failed to notify user or edit message. Error: {e}")
+        logger.error("Failed to notify user after approval: %s", e)
+        await query.message.edit_text(f"Approved but failed to notify user. {beautiful_message}", parse_mode="Markdown")
 
 
 async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -888,24 +803,10 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
             chat_id=user_id,
             text="❌ Admin has denied your payment/receipt. Please contact support or retry the payment.",
         )
-        
-        # Admin Notification: Edit the original message to show 'Denied' status (NEW)
-        admin_username = query.from_user.username or "Admin"
-        processed_msg = (
-            f"❌ **DENIED**\n"
-            f"User: {get_user_data_from_sheet(user_id).get('username', f'id:{user_id}')}\n"
-            f"Processed by: @{admin_username} (id:`{query.from_user.id}`)\n"
-            f"Time: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
-        )
-
-        await query.message.edit_text(
-            text=processed_msg,
-            parse_mode="Markdown"
-        )
-
+        await query.message.edit_text("❌ Denied and user notified.")
     except Exception as e:
-        logger.error("Failed to notify user or edit admin message after denial: %s", e)
-        await query.message.reply_text("Denied but failed to notify user or edit message.")
+        logger.error("Failed to notify user after denial: %s", e)
+        await query.message.edit_text("Denied but failed to notify user.")
 
 
 # ----------- Product purchase flow (NEW CANCEL BUTTONS ADDED) -----------
@@ -992,15 +893,6 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
 async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
-    
-    # NEW: Global Bot Status Check
-    if is_bot_closed():
-        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
-                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
-                                        reply_markup=MAIN_MENU_KEYBOARD,
-                                        parse_mode="Markdown")
-        return ConversationHandler.END
-
 
     if is_user_banned(user_id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။", reply_markup=MAIN_MENU_KEYBOARD)
@@ -1060,7 +952,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
     if user_coins < price_needed_coins:
         await update.message.reply_text(
-            f"❌ Insufficient coin balance. You need {price_needed_coins} Coins but have {user_coins} Coins. Use '💰 Payment Method' to top up.",
+            f"❌ Insufficient coin balance. You need {price_needed_coins:,.0f} Coins but have {user_coins:,.0f} Coins. Use '💰 Payment Method' to top up.",
             reply_markup=MAIN_MENU_KEYBOARD
         )
         order = {
@@ -1094,7 +986,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         "phone": premium_phone,
         "premium_username": premium_username,
         "status": "ORDER_PLACED",
-        "notes": f"Order placed and {price_needed_coins} Coins deducted.",
+        "notes": f"Order placed and {price_needed_coins:,.0f} Coins deducted.",
     }
     log_order(order)
     
@@ -1104,28 +996,21 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
 
     await update.message.reply_text(
-        f"✅ Order successful! **{price_needed_coins} Coins** have been deducted for {product_key.replace('_',' ').upper()}.\n"
-        f"New balance: {new_balance} Coins. Please wait while service is processed.",
+        f"✅ Order successful! **{price_needed_coins:,.0f} Coins** have been deducted for {product_key.replace('_',' ').upper()}.\n"
+        f"New balance: {new_balance:,.0f} Coins. Please wait while service is processed.",
         reply_markup=MAIN_MENU_KEYBOARD # Show main menu keyboard on success
     )
     try:
-        # MODIFIED: Updated Admin notification message formatting (Request 6)
         admin_msg = (
-            f"🛒 New Order\n\n"
-            
-            f"📝 Order ID: `{order['order_id']}`\n"
-            f"♦️ User: @{user.username or user.full_name} (id:`{user_id}`)\n"
-            f"________________________________\n\n"
-            
-            f"💾 Product: `{product_key}`\n"
-            f"💰 Price: {price_mmk_needed} MMK ({price_needed_coins} Coins deducted)\n\n"
-            
-            f"☎️ Phone: `{premium_phone}`\n"
-            f"🎭 Username: {premium_username}\n"
-            f"________________________________"
+            f"🛒 New Order\n"
+            f"Order ID: {order['order_id']}\n"
+            f"User: @{user.username or user.full_name} (id:{user_id})\n"
+            f"Product: {product_key}\n"
+            f"Price: {price_mmk_needed:,.0f} MMK ({price_needed_coins:,.0f} Coins deducted)\n"
+            f"Phone: {premium_phone}\n"
+            f"Username: {premium_username}\n"
         )
-        
-        await context.bot.send_message(chat_id=admin_id_check, text=admin_msg, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=admin_id_check, text=admin_msg)
     except Exception as e:
         logger.error("Failed to notify admin about order: %s", e)
 
@@ -1140,23 +1025,22 @@ async def cancel_product_order(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-# MODIFIED: Global back to service menu (menu_back) now only returns to the appropriate Reply Keyboard
+# MODIFIED: Global back to service menu (menu_back) now only returns to the main Reply Keyboard
 async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    user_id = query.from_user.id
+    user = query.from_user
     config = get_config_data()
     admin_id_check = get_dynamic_admin_id(config)
     
-    if user_id == admin_id_check:
-        reply_markup = ADMIN_MENU_KEYBOARD # Admin: Show Admin Keyboard
-        welcome_text = "Returned to Admin Menu."
-    else:
-        reply_markup = MAIN_MENU_KEYBOARD # User: Show Main Menu Keyboard
-        welcome_text = "Welcome back to the main menu. Choose from the options below."
+    # Check if the user is the Admin from the config sheet
+    is_admin = (user.id == admin_id_check)
+    keyboard_to_use = ADMIN_REPLY_KEYBOARD if is_admin else MAIN_MENU_KEYBOARD
 
+    welcome_text = "Welcome back to the main menu. Choose from the options below."
 
+    # Use reply_text which sends a new message with the Reply Keyboard.
     try:
         # Delete the previous inline message if possible
         await query.message.delete()
@@ -1166,195 +1050,9 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     await context.bot.send_message(
         chat_id=query.from_user.id,
         text=welcome_text,
-        reply_markup=reply_markup, # Use conditional markup
+        reply_markup=keyboard_to_use, # Use the determined keyboard
     )
     return ConversationHandler.END # Exit any active conversation state
-
-
-# NEW: Handler for '⚙️ Close to Selling' button
-async def start_close_to_selling(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
-    
-    if user.id != admin_id_check:
-        await update.message.reply_text("You are not authorized to use this feature.")
-        return
-
-    current_status = config.get('bot_status', 'active').upper()
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Active (Open Bot)", callback_data="set_status_active")],
-        [InlineKeyboardButton("⛔ Close (Maintenance)", callback_data="set_status_closed")]
-    ])
-    
-    await update.message.reply_text(
-        f"⚙️ **Bot Status Management**\n\n"
-        f"Current Status: **{current_status}**\n\n"
-        f"Choose the new status:",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
-
-# NEW: Callback handler for setting the status
-async def set_new_bot_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data.split("_") # e.g., set_status_active
-    new_status = data[-1]
-    
-    is_success = set_bot_status(new_status)
-    
-    if is_success:
-        status_text = "🟢 ACTIVE (Bot is Open)" if new_status == 'active' else "⛔ CLOSED (Maintenance Mode)"
-        
-        await query.message.edit_text(
-            f"✅ **Status Updated!**\n\n"
-            f"New Bot Status is: **{status_text}**.\n"
-            f"Users will now see the appropriate message.",
-            parse_mode="Markdown"
-        )
-    else:
-        await query.message.edit_text("❌ Failed to update the bot status in the Google Sheet.")
-
-
-# NEW: Handler for '👾 Broadcast' button
-async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
-
-    if user.id != admin_id_check:
-        await update.message.reply_text("You are not authorized to use this feature.")
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        "📝 **Broadcast Mode**\n\n"
-        "Please send the **Message and Photo** you want to broadcast to all users in *one single message*.\n"
-        "The photo must be attached to the message with a caption (text).\n\n"
-        "Click '❌ Cancel Admin Action' to stop.",
-        reply_markup=ADMIN_CANCEL_KEYBOARD,
-        parse_mode="Markdown"
-    )
-    return BROADCAST_WAITING_FOR_CONTENT
-
-
-# NEW: Handler to receive content and start confirmation
-async def receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    # Must contain both photo and caption/text
-    if not (update.message.photo and update.message.caption):
-        await update.message.reply_text(
-            "❌ Invalid input. Please send the message and photo in *one message* (photo with caption/text)."
-        )
-        return BROADCAST_WAITING_FOR_CONTENT # Wait again
-
-    # Store content
-    context.user_data["broadcast_photo_id"] = update.message.photo[-1].file_id # Largest photo size
-    context.user_data["broadcast_caption"] = update.message.caption
-    
-    # Get total user count (excluding header row)
-    total_users_count = len(WS_USER_DATA.get_all_records()) if WS_USER_DATA else 0
-    if total_users_count > 0:
-        # Subtract the header row.
-        total_users_count -= 1 
-    
-    # Send confirmation message with the content
-    confirm_text = (
-        f"✅ **Confirmation**\n\n"
-        f"You are about to send this message to **ALL {total_users_count} users** (approximate, excluding header row and banned/admin).\n"
-        f"Do you want to proceed?"
-    )
-    confirmation_kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Send Broadcast NOW", callback_data="broadcast_confirm_yes")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="broadcast_confirm_no")]
-    ])
-    
-    # Send the photo and caption back to admin for confirmation
-    await context.bot.send_photo(
-        chat_id=user.id,
-        photo=context.user_data["broadcast_photo_id"],
-        caption=confirm_text + "\n\n---\n" + context.user_data["broadcast_caption"],
-        reply_markup=confirmation_kb,
-        parse_mode="Markdown"
-    )
-
-    return BROADCAST_CONFIRMATION
-
-
-# NEW: Handler for final confirmation and execution
-async def finalize_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if query.data == "broadcast_confirm_no":
-        await query.message.edit_text("❌ Broadcast cancelled.")
-        # Send Admin Menu Keyboard explicitly since this is a CallbackQueryHandler
-        await context.bot.send_message(query.from_user.id, "Returned to Admin Menu.", reply_markup=ADMIN_MENU_KEYBOARD)
-        return ConversationHandler.END
-
-    # Start sending
-    await query.message.edit_text("⏳ **Broadcast started...** This may take a few minutes.", parse_mode="Markdown")
-    
-    photo_id = context.user_data.get("broadcast_photo_id")
-    caption = context.user_data.get("broadcast_caption")
-    
-    # Fetch Admin ID once
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
-    
-    user_rows = WS_USER_DATA.get_all_records()
-    total_users = 0
-    success_count = 0
-    fail_count = 0
-    
-    for row in user_rows:
-        try:
-            target_id = int(row.get("user_id"))
-            if target_id == admin_id_check:
-                continue # Skip admin
-            if row.get("banned", "FALSE").upper() == "TRUE":
-                continue # Skip banned users
-            
-            total_users += 1
-            # Send photo/caption
-            await context.bot.send_photo(
-                chat_id=target_id,
-                photo=photo_id,
-                caption=caption,
-                parse_mode="Markdown" # Ensure markdown is supported in broadcast
-            )
-            success_count += 1
-            # Add a small delay to respect Telegram's rate limits
-            await asyncio.sleep(0.05) 
-        except Exception as e:
-            # Catch exceptions like 'Bot blocked by user' or 'Chat not found'
-            if "blocked by the user" in str(e) or "chat not found" in str(e):
-                 logger.info("User %s blocked the bot. Skipping.", row.get("user_id"))
-            else:
-                 logger.error("Failed to send broadcast to user %s: %s", row.get("user_id"), e)
-                 fail_count += 1
-
-    final_msg = (
-        f"✅ **Broadcast Complete!**\n"
-        f"Total Users Targeted: {total_users}\n"
-        f"Successful Sends: {success_count}\n"
-        f"Failed/Blocked Sends: {fail_count}"
-    )
-    
-    await query.message.reply_text(final_msg, reply_markup=ADMIN_MENU_KEYBOARD, parse_mode="Markdown")
-    return ConversationHandler.END
-
-
-# NEW: Cancel handler for Admin actions
-async def cancel_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❌ Admin action cancelled. You have returned to the Admin Menu.",
-        reply_markup=ADMIN_MENU_KEYBOARD
-    )
-    return ConversationHandler.END
 
 
 # Admin commands (ban/unban) - Updated to use config ID
@@ -1404,6 +1102,204 @@ async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"User {target} unbanned.")
     else:
         await update.message.reply_text("Failed to unban user.")
+        
+# NEW: Placeholder functions for new Admin buttons
+async def show_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⚙️ Bot Status control functionality here.")
+
+async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👾 Broadcast functionality here.")
+    
+async def handle_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👤 User Search functionality here.")
+    
+async def handle_refresh_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    get_config_data(force_refresh=True)
+    await update.message.reply_text("🔄 Config data refreshed from Google Sheet.")
+    
+async def handle_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📊 Statistics functionality here.")
+
+
+# --------------- Cash Control Functions (NEW) ---------------
+
+# Function to start the Cash Control process
+async def start_cash_control(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.effective_user
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    if user.id != admin_id_check:
+        await update.message.reply_text("You are not authorized to use Cash Control.", reply_markup=ADMIN_REPLY_KEYBOARD)
+        return ConversationHandler.END
+
+    # Ask Admin for User ID or Username
+    await update.message.reply_text(
+        "📝 **CASH CONTROL**\n\n"
+        "Please enter the **User ID (number)** or **Username (@...)** of the user whose balance you want to modify.",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
+    )
+    
+    return AWAIT_CASH_CONTROL_ID
+
+# Function to handle cancellation
+async def cash_control_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "📝 Cash Control cancelled.",
+        reply_markup=ADMIN_REPLY_KEYBOARD
+    )
+    return ConversationHandler.END
+
+# Function to get User ID/Username and ask for amount
+async def cash_control_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    input_identifier = update.message.text.strip()
+    
+    # 1. Resolve User ID from input (ID or Username)
+    user_id_int = None
+    target_username = None
+    
+    ws_user = WS_USER_DATA # Use global sheet variable
+
+    if input_identifier.isdigit():
+        user_id_int = int(input_identifier)
+        # Check if the user exists in the sheet
+        if find_user_row(user_id_int):
+            # Get the username for display
+            user_data = get_user_data_from_sheet(user_id_int)
+            target_username = user_data.get("username", f"ID:{user_id_int}")
+    
+    elif input_identifier.startswith('@'):
+        target_username = input_identifier
+        # Search the user_data sheet for the username
+        try:
+            cell = ws_user.find(target_username, in_column=2) # Search by username in column B
+            if cell:
+                user_id_int = int(ws_user.cell(cell.row, 1).value) # Get ID from column A
+        except Exception:
+            pass # user_id_int remains None
+    
+    else:
+         # Try to treat plain text as a username too
+         target_username = "@" + input_identifier
+         try:
+            cell = ws_user.find(target_username, in_column=2)
+            if cell:
+                user_id_int = int(ws_user.cell(cell.row, 1).value)
+         except Exception:
+            pass
+
+
+    if not user_id_int or not find_user_row(user_id_int):
+        await update.message.reply_text("❌ User not found or ID/Username is invalid. Please try again or type '⬅️ Cancel'.")
+        return AWAIT_CASH_CONTROL_ID
+         
+    # Store the target ID and Username in context
+    context.user_data['target_cash_control_id'] = user_id_int
+    context.user_data['target_cash_control_name'] = target_username
+    
+    # 2. Ask for Coin amount
+    await update.message.reply_text(
+        f"📝 **Target User Found**: {target_username} (ID `{user_id_int}`)\n\n"
+        "Please enter the Coin amount to add or subtract.\n"
+        "Use **+** for adding (e.g., `+5000`)\n"
+        "Use **-** for subtracting (e.g., `-100`)\n",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
+    )
+    
+    return AWAIT_CASH_CONTROL_AMOUNT
+
+# Function to apply the coin change and finish
+async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    amount_text = update.message.text.strip()
+    target_user_id = context.user_data.get('target_cash_control_id')
+    target_user_name = context.user_data.get('target_cash_control_name', f"ID:{target_user_id}")
+    admin_user = update.effective_user
+    
+    if not target_user_id:
+        await update.message.reply_text("❌ Error: Target user ID lost. Please restart Cash Control.", reply_markup=ADMIN_REPLY_KEYBOARD)
+        return ConversationHandler.END
+
+    # 1. Validate the input format (+/- and number)
+    match = re.match(r"([+\-]\d+)", amount_text)
+    if not match:
+        await update.message.reply_text("❌ Invalid format. Please use '+[number]' or '-[number]' (e.g., `+5000` or `-100`).")
+        return AWAIT_CASH_CONTROL_AMOUNT
+
+    try:
+        coin_change = int(match.group(1))
+    except ValueError:
+        await update.message.reply_text("❌ The number provided is too large or not a valid integer.")
+        return AWAIT_CASH_CONTROL_AMOUNT
+
+    # 2. Update Coin Balance in the sheet
+    ws_user = WS_USER_DATA
+    user_row = find_user_row(target_user_id)
+    
+    if user_row:
+        balance_cell_col = 3 # coin_balance is Column C
+        # Ensure we read the current balance correctly (clean up the string)
+        try:
+             old_balance = int(ws_user.cell(user_row, balance_cell_col).value or 0)
+        except ValueError:
+             old_balance = 0
+             
+        new_balance = old_balance + coin_change
+        
+        # Update the sheet
+        ws_user.update_cell(user_row, balance_cell_col, new_balance)
+        
+        # 3. Create success message for Admin
+        if coin_change > 0:
+            action_text = "Added"
+            action_emoji = "🟢"
+        elif coin_change < 0:
+            action_text = "Subtracted"
+            action_emoji = "🔴"
+        else:
+            action_text = "No Change"
+            action_emoji = "⚪"
+
+        admin_processed_by = f"@{admin_user.username}" if admin_user.username else f"ID:{admin_user.id}"
+        
+        admin_success_msg = (
+            f"✅ **Cash Control Successful!**\n\n"
+            f"{action_emoji} **Action:** {action_text} **{abs(coin_change):,.0f} Coins**\n"
+            f"**User:** {target_user_name} (ID `{target_user_id}`)\n"
+            f"**Old Balance:** {old_balance:,.0f} Coins\n"
+            f"**New Balance:** {new_balance:,.0f} Coins\n"
+            f"**Processed by:** {admin_processed_by}"
+        )
+        
+        await update.message.reply_text(admin_success_msg, parse_mode="Markdown", reply_markup=ADMIN_REPLY_KEYBOARD)
+
+        # 4. Notify User (Only if coins were added, as requested)
+        if coin_change > 0:
+            user_notification = (
+                f"🎉 **Coin Update Notification**\n\n"
+                f"**{coin_change:,.0f} Coins** have been manually added to your account by the Admin.\n\n"
+                f"Your new balance is **{new_balance:,.0f} Coins**."
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text=user_notification,
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                await update.message.reply_text(f"⚠️ Warning: Could not send notification to user ID {target_user_id}. Error: {e}", reply_markup=ADMIN_REPLY_KEYBOARD)
+
+    else:
+        await update.message.reply_text("❌ Error: Target user row could not be located in the sheet during final update.", reply_markup=ADMIN_REPLY_KEYBOARD)
+
+    # Clean up context data
+    if 'target_cash_control_id' in context.user_data:
+        del context.user_data['target_cash_control_id']
+    if 'target_cash_control_name' in context.user_data:
+        del context.user_data['target_cash_control_name']
+        
+    return ConversationHandler.END
 
 
 # Error handler (sanitized) - Updated to use config ID
@@ -1444,6 +1340,14 @@ def main():
     # Admin commands
     application.add_handler(CommandHandler("ban", admin_ban_user))
     application.add_handler(CommandHandler("unban", admin_unban_user))
+    
+    # NEW: Message handlers for Admin Reply Keyboard (placeholders)
+    application.add_handler(MessageHandler(filters.Text("⚙️ Close to Selling"), show_admin_settings))
+    application.add_handler(MessageHandler(filters.Text("👾 Broadcast"), handle_broadcast))
+    application.add_handler(MessageHandler(filters.Text("👤 User Search"), handle_user_search))
+    application.add_handler(MessageHandler(filters.Text("🔄 Refresh Config"), handle_refresh_config))
+    application.add_handler(MessageHandler(filters.Text("📊 Statistics"), handle_statistics))
+
 
     # Payment Conversation Handler (entry: Payment Method button)
     payment_conv_handler = ConversationHandler(
@@ -1492,25 +1396,21 @@ def main():
     )
     application.add_handler(product_purchase_handler)
 
-    # Admin Broadcast Conversation Handler (NEW)
-    broadcast_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Text("👾 Broadcast"), start_broadcast)],
+    # NEW: Cash Control Conversation Handler
+    cash_control_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Text("📝 Cash Control"), start_cash_control)],
         states={
-            BROADCAST_WAITING_FOR_CONTENT: [
-                MessageHandler(filters.Text("❌ Cancel Admin Action"), cancel_admin_action),
-                MessageHandler(filters.PHOTO & filters.Caption, receive_broadcast_content), # Photo + Caption Required
+            AWAIT_CASH_CONTROL_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), cash_control_get_id)
             ],
-            BROADCAST_CONFIRMATION: [
-                CallbackQueryHandler(finalize_broadcast, pattern=r"^broadcast_confirm_")
-            ],
+            AWAIT_CASH_CONTROL_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), cash_control_apply_amount)
+            ]
         },
-        fallbacks=[
-            MessageHandler(filters.Text("❌ Cancel Admin Action"), cancel_admin_action),
-            # MessageHandler(filters.Regex(r".*"), cancel_admin_action) # Catch any other text input as implicit cancel
-        ],
-        allow_reentry=True,
+        fallbacks=[MessageHandler(filters.Text("⬅️ Cancel"), cash_control_cancel)],
+        allow_reentry=True
     )
-    application.add_handler(broadcast_conv_handler)
+    application.add_handler(cash_control_handler)
 
 
     # Message handlers for reply keyboard
@@ -1519,10 +1419,6 @@ def main():
     
     # NEW: Handler for the "Premium & Star" Reply Button
     application.add_handler(MessageHandler(filters.Text("✨ Premium & Star"), show_product_inline_menu))
-    
-    # NEW: Handler for the "Close to Selling" Admin Button
-    application.add_handler(MessageHandler(filters.Text("⚙️ Close to Selling"), start_close_to_selling))
-    application.add_handler(CallbackQueryHandler(set_new_bot_status_callback, pattern=r"^set_status_"))
     
     # Inline callbacks: products
     application.add_handler(CallbackQueryHandler(start_product_purchase, pattern=r"^product_"))
