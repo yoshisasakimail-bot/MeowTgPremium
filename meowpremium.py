@@ -1648,10 +1648,6 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("cancel", cancel_product_order)) # NEW: Handle /cancel command
 
-    # Admin commands (legacy /ban /unban)
-    application.add_handler(CommandHandler("ban", admin_ban_user))
-    application.add_handler(CommandHandler("unban", admin_unban_user))
-    
     # Admin Inline Callback Handlers
     application.add_handler(CallbackQueryHandler(set_bot_status_callback, pattern=r"^set_status_"))
     application.add_handler(CallbackQueryHandler(toggle_ban_callback, pattern=r"^toggleban\|"))
