@@ -269,21 +269,46 @@ def get_payment_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+# MODIFIED: Show price in Coin instead of MMK
 def get_product_keyboard(product_type: str) -> InlineKeyboardMarkup:
     config = get_config_data()
     keyboard_buttons = []
     prefix = f"{product_type}_"
     product_keys = sorted([k for k in config.keys() if k.startswith(prefix)])
     
-    # NEW: Use ❄️ for Premium
-    icon = '⭐' if product_type == 'star' else '❄️' 
+    # NEW: Determine icon and get Coin Rate from config
+    icon = '⭐' if product_type == 'star' else '❄️' # Using ❄️ as requested
+    coin_rate_key = f"coin_rate_{product_type}"
+    
+    # Use 1000 if not found in config to avoid division by zero.
+    try:
+        # Get the coin rate (MMK price to 1 Coin)
+        coin_rate_mmk = float(config.get(coin_rate_key, "1000")) 
+    except ValueError:
+        coin_rate_mmk = 1000.0
+
+    if coin_rate_mmk <= 0:
+         coin_rate_mmk = 1000.0
     
     for key in product_keys:
-        price = config.get(key)
-        if price:
+        price_mmk_str = config.get(key)
+        if price_mmk_str:
+            try:
+                price_mmk = int(price_mmk_str)
+            except ValueError:
+                continue # Skip if MMK price is invalid
+            
+            # Calculate Coin Price: MMK Price / Coin Rate (MMK per 1 Coin)
+            # Use ceiling to round up to the nearest integer Coin
+            price_coin = int(price_mmk / coin_rate_mmk) 
+            
+            # Ensure price is at least 1 Coin
+            price_coin = max(1, price_coin) 
+
             button_name = key.replace(prefix, "").replace("_", " ").title()
-            # MODIFIED: Use the updated icon
-            button_text = f"{icon} {button_name} ({price} MMK)" 
+            
+            # MODIFIED: Display Coin Price
+            button_text = f"{icon} {button_name} ({price_coin} Coins)" 
             keyboard_buttons.append([InlineKeyboardButton(button_text, callback_data=f"{key}")])
 
     # Go back to the menu where the 'Premium & Star' button is visible
@@ -565,17 +590,22 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 choices = default_choices
 
         else:
+            # MODIFIED: Use the requested amounts as the final fallback default
             choices = default_choices
 
+        # If a detected amount exists and is not one of the choices, prepend it
         if detected_amount and detected_amount not in choices:
             choices = [detected_amount] + choices
+
+        # Ensure unique and sorted (optional: but useful for consistent UI)
+        choices = sorted(list(set(choices)), reverse=True)
 
         kb_rows = []
         row = []
         for i, amt in enumerate(choices):
             # FIX: Use short prefix 'rpa' (Receipt Process Approve)
             row.append(InlineKeyboardButton(f"✅ Approve {amt} MMK", callback_data=f"rpa|{user.id}|{short_ts}|{amt}"))
-            if len(row) == 2:
+            if len(row) == 2: # Keep two buttons per row as requested
                 kb_rows.append(row)
                 row = []
         if row:
@@ -682,7 +712,7 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         )
         
         # Admin Notification (Request 2)
-        admin_success_msg = f"✅ Approved and {display_username} balance {new_balance} coin Successful."
+        admin_success_msg = f"✅ Approved and {display_username} balance {coins_to_add} coin Successful. Total Balance: {new_balance} Coins."
         await query.message.reply_text(admin_success_msg)
         
     except Exception as e:
@@ -859,20 +889,35 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         return ConversationHandler.END
 
     try:
-        price_needed = int(price_mmk_str)
+        price_mmk_needed = int(price_mmk_str)
     except ValueError:
-        await update.message.reply_text("❌ Product price in config is invalid.", reply_markup=MAIN_MENU_KEYBOARD)
+        await update.message.reply_text("❌ Product MMK price in config is invalid.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
+    # --- Calculate Coin Price needed ---
+    product_type = product_key.split('_')[0]
+    coin_rate_key = f"coin_rate_{product_type}"
+    try:
+        coin_rate_mmk = float(config.get(coin_rate_key, "1000")) 
+    except ValueError:
+        coin_rate_mmk = 1000.0
+
+    if coin_rate_mmk <= 0:
+         coin_rate_mmk = 1000.0
+         
+    price_needed_coins = int(price_mmk_needed / coin_rate_mmk) 
+    price_needed_coins = max(1, price_needed_coins) # Ensure at least 1 coin
+
+    # --- Check Balance ---
     user_data = get_user_data_from_sheet(user_id)
     try:
         user_coins = int(user_data.get("coin_balance", "0"))
     except ValueError:
         user_coins = 0
 
-    if user_coins < price_needed:
+    if user_coins < price_needed_coins:
         await update.message.reply_text(
-            f"❌ Insufficient coin balance. You need {price_needed} but have {user_coins}. Use '💰 Payment Method' to top up.",
+            f"❌ Insufficient coin balance. You need {price_needed_coins} Coins but have {user_coins} Coins. Use '💰 Payment Method' to top up.",
             reply_markup=MAIN_MENU_KEYBOARD
         )
         order = {
@@ -880,7 +925,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
             "user_id": user_id,
             "username": user_data.get("username", ""),
             "product_key": product_key,
-            "price_mmk": price_needed,
+            "price_mmk": price_mmk_needed,
             "phone": premium_phone,
             "premium_username": premium_username,
             "status": "FAILED_INSUFFICIENT_FUNDS",
@@ -889,22 +934,24 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         log_order(order)
         return ConversationHandler.END
 
-    new_balance = user_coins - price_needed
+    # --- Deduct Coin ---
+    new_balance = user_coins - price_needed_coins
     ok = update_user_balance(user_id, new_balance)
     if not ok:
         await update.message.reply_text("❌ Failed to deduct coins. Please contact admin.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
+    # --- Log Order ---
     order = {
         "order_id": str(uuid.uuid4()),
         "user_id": user_id,
         "username": user_data.get("username", ""),
         "product_key": product_key,
-        "price_mmk": price_needed,
+        "price_mmk": price_mmk_needed, # Log the MMK price for consistency
         "phone": premium_phone,
         "premium_username": premium_username,
         "status": "ORDER_PLACED",
-        "notes": "Order placed and coins deducted.",
+        "notes": f"Order placed and {price_needed_coins} Coins deducted.",
     }
     log_order(order)
     
@@ -914,7 +961,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
 
     await update.message.reply_text(
-        f"✅ Order successful! {price_needed} Coins have been deducted for {product_key.replace('_',' ').upper()}.\n"
+        f"✅ Order successful! **{price_needed_coins} Coins** have been deducted for {product_key.replace('_',' ').upper()}.\n"
         f"New balance: {new_balance} Coins. Please wait while service is processed.",
         reply_markup=MAIN_MENU_KEYBOARD # Show main menu keyboard on success
     )
@@ -924,7 +971,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
             f"Order ID: {order['order_id']}\n"
             f"User: @{user.username or user.full_name} (id:{user_id})\n"
             f"Product: {product_key}\n"
-            f"Price: {price_needed}\n"
+            f"Price: {price_mmk_needed} MMK ({price_needed_coins} Coins deducted)\n"
             f"Phone: {premium_phone}\n"
             f"Username: {premium_username}\n"
         )
