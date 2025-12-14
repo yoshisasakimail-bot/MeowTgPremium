@@ -560,15 +560,15 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb_rows = []
         row = []
         for i, amt in enumerate(choices):
-            # Use short_ts in callback_data
-            row.append(InlineKeyboardButton(f"✅ Approve {amt} MMK", callback_data=f"admin_approve_receipt|{user.id}|{short_ts}|{amt}"))
+            # FIX: Use short prefix 'rpa' (Receipt Process Approve)
+            row.append(InlineKeyboardButton(f"✅ Approve {amt} MMK", callback_data=f"rpa|{user.id}|{short_ts}|{amt}"))
             if len(row) == 2:
                 kb_rows.append(row)
                 row = []
         if row:
             kb_rows.append(row)
-        # Use short_ts in callback_data
-        kb_rows.append([InlineKeyboardButton("❌ Deny", callback_data=f"admin_deny_receipt|{user.id}|{short_ts}")])
+        # FIX: Use short prefix 'rpd' (Receipt Process Deny)
+        kb_rows.append([InlineKeyboardButton("❌ Deny", callback_data=f"rpd|{user.id}|{short_ts}")])
 
         await context.bot.send_message(
             chat_id=admin_contact_id,
@@ -578,6 +578,7 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         # Error တက်ပါက Bot မှ Admin သို့ Approval Button များပို့ရန် မအောင်မြင်ပါ။
         logger.error("Failed to send receipt buttons to admin: %s", e)
+        # The receipt forward succeeded but the buttons failed, so we give a specific error.
         await update.message.reply_text("❌ Could not forward receipt to admin. Please try again later. Please check your ADMIN_ID and Bot permissions.")
         return ConversationHandler.END
 
@@ -589,7 +590,7 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_approve_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # admin_approve_receipt|<user_id>|<short_ts>|<amount>
+    data = query.data  # rpa|<user_id>|<short_ts>|<amount>
     parts = data.split("|")
     if len(parts) < 4:
         await query.message.reply_text("Invalid admin action.")
@@ -665,7 +666,7 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
 async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data
+    data = query.data # rpd|<user_id>|<short_ts>
     parts = data.split("|")
     if len(parts) < 3:
         await query.message.reply_text("Invalid admin action.")
@@ -1083,9 +1084,9 @@ def main():
     # Inline callbacks: products
     application.add_handler(CallbackQueryHandler(start_product_purchase, pattern=r"^product_"))
     
-    # Admin callback handlers for approve/deny
-    application.add_handler(CallbackQueryHandler(admin_approve_receipt_callback, pattern=r"^admin_approve_receipt\|"))
-    application.add_handler(CallbackQueryHandler(admin_deny_receipt_callback, pattern=r"^admin_deny_receipt\|"))
+    # Admin callback handlers for approve/deny (Updated patterns)
+    application.add_handler(CallbackQueryHandler(admin_approve_receipt_callback, pattern=r"^rpa\|"))
+    application.add_handler(CallbackQueryHandler(admin_deny_receipt_callback, pattern=r"^rpd\|"))
 
     # Back/menu callback (This is crucial for returning to the main Reply Keyboard)
     application.add_handler(CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"))
