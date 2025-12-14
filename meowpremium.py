@@ -5,9 +5,9 @@ import json
 import datetime
 import re
 import uuid
+import asyncio # NEW: Added for Broadcast delay
 from typing import Dict, Optional
 import gspread
-from google.auth.transport.requests import Request
 from telegram import (
     Update,
     InlineKeyboardMarkup,
@@ -59,7 +59,11 @@ CONFIG_TTL_SECONDS = int(os.environ.get("CONFIG_TTL_SECONDS", "25"))
     WAITING_FOR_PHONE,
     WAITING_FOR_USERNAME,
     SELECT_COIN_PACKAGE,
-) = range(6)
+    # NEW: Admin Broadcast States
+    BROADCAST_WAITING_FOR_CONTENT, 
+    BROADCAST_CONFIRMATION,
+) = range(8) # MODIFIED: Changed range from 6 to 8
+
 
 # ------------ Helper: Retry wrapper for sheet init ----------------
 def initialize_sheets(retries: int = 3, backoff: float = 2.0) -> bool:
@@ -134,6 +138,43 @@ def get_dynamic_admin_id(config: Dict) -> int:
         # If the value in the sheet is not a valid integer, use the global default
         logger.warning("admin_contact_id in sheet is invalid or missing. Using fallback: %s", ADMIN_ID)
         return ADMIN_ID
+
+
+# NEW: Helper to check the current bot status from config sheet
+def is_bot_closed():
+    config = get_config_data()
+    # Default to 'active' if key not found
+    return config.get('bot_status', 'active').lower() == 'closed'
+
+# NEW: Helper to update the bot status in the config sheet
+def set_bot_status(status: str) -> bool:
+    global WS_CONFIG, CONFIG_CACHE
+    try:
+        if WS_CONFIG is None:
+            logger.error("WS_CONFIG is not initialized in set_bot_status.")
+            return False
+        
+        # We need to find the 'bot_status' row and update its value
+        records = WS_CONFIG.get_all_records()
+        
+        # Look for existing 'bot_status' key
+        for i, record in enumerate(records):
+            if record.get("key") == "bot_status":
+                # Row index in gspread is 1-based, plus header row (i+2)
+                WS_CONFIG.update_cell(i + 2, 2, status.lower()) 
+                # After updating, clear the cache
+                CONFIG_CACHE = {"data": {}, "ts": 0}
+                return True
+        
+        # If 'bot_status' key doesn't exist, append a new row
+        WS_CONFIG.append_row(["bot_status", status.lower()])
+        # After appending, clear the cache
+        CONFIG_CACHE = {"data": {}, "ts": 0}
+        return True
+
+    except Exception as e:
+        logger.error("Failed to update bot status in config sheet: %s", e)
+        return False
 
 
 # ------------ User data helpers ----------------
@@ -354,6 +395,14 @@ ENGLISH_REPLY_KEYBOARD = [
 ]
 MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(ENGLISH_REPLY_KEYBOARD, resize_keyboard=True, one_time_keyboard=False)
 
+# NEW: Admin Only Reply Keyboard
+ADMIN_REPLY_KEYBOARD = [
+    [KeyboardButton("👤 User Info"), KeyboardButton("💰 Payment Method")],
+    [KeyboardButton("❓ Help Center"), KeyboardButton("✨ Premium & Star")],
+    [KeyboardButton("👾 Broadcast"), KeyboardButton("⚙️ Close to Selling")] # Added Broadcast and Close to Selling
+]
+ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(ADMIN_REPLY_KEYBOARD, resize_keyboard=True, one_time_keyboard=False)
+
 
 # New inline keyboard for the service selection (only Star and Premium)
 PRODUCT_SELECTION_INLINE_KEYBOARD = InlineKeyboardMarkup(
@@ -369,6 +418,13 @@ CANCEL_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("❌ Cancel Order")]],
     resize_keyboard=True,
     one_time_keyboard=True # Use one_time_keyboard for temporary keyboards
+)
+
+# NEW: Reply keyboard for cancelling Admin actions
+ADMIN_CANCEL_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("❌ Cancel Admin Action")]],
+    resize_keyboard=True,
+    one_time_keyboard=True
 )
 
 
@@ -397,26 +453,53 @@ def parse_amount_from_text(text: str) -> Optional[int]:
 
 
 # ------------ Handlers ----------------
-# MODIFIED: start_command uses the new welcome message format
+# MODIFIED: start_command uses the new welcome message format and checks for admin and status
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Global Bot Status Check
+    if is_bot_closed():
+        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
+                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
+                                        parse_mode="Markdown")
+        return
+
     user = update.effective_user
     register_user_if_not_exists(user.id, user.full_name)
     if is_user_banned(user.id):
         # Keep Burmese ban message as it is likely crucial for the audience
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားထားသည်။ Support ထံ ဆက်သွယ်ပါ။")
         return
-    # MODIFIED: Updated welcome message format (Request 5)
-    welcome_text = (
-        f"Hello, 👑**{user.full_name}**\n\n"
-        f"🧸Welcome — Meow Telegram Bot 🫶\n"
-        f"To make a purchase with excellent service and advanced functionality, choose from the menu below."
-    )
-    # Send the main menu reply keyboard
-    await update.message.reply_text(welcome_text, reply_markup=MAIN_MENU_KEYBOARD, parse_mode="Markdown")
+
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    # NEW: Admin Check
+    if user.id == admin_id_check:
+        reply_markup = ADMIN_MENU_KEYBOARD # Use Admin Keyboard
+        welcome_text = (
+            f"Hello, 👑**{user.full_name}**\n\n"
+            f"**ADMIN MODE ACTIVATED.**\n"
+            f"Use the menu below to manage or use commands like /ban, /unban."
+        )
+    else:
+        reply_markup = MAIN_MENU_KEYBOARD # Use User Keyboard
+        welcome_text = (
+            f"Hello, 👑**{user.full_name}**\n\n"
+            f"🧸Welcome — Meow Telegram Bot 🫶\n"
+            f"To make a purchase with excellent service and advanced functionality, choose from the menu below."
+        )
+
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 # NEW: Function to display the Star/Premium inline buttons, triggered by the new Reply Button
 async def show_product_inline_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Global Bot Status Check
+    if is_bot_closed():
+        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
+                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
+                                        parse_mode="Markdown")
+        return ConversationHandler.END
+
     user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
@@ -430,6 +513,13 @@ async def show_product_inline_menu(update: Update, context: ContextTypes.DEFAULT
 
 # MODIFIED: Does not show service menu afterwards
 async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Global Bot Status Check
+    if is_bot_closed():
+        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
+                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
+                                        parse_mode="Markdown")
+        return
+        
     user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
@@ -450,6 +540,13 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # MODIFIED: Does not show service menu afterwards
 async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Global Bot Status Check
+    if is_bot_closed():
+        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
+                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
+                                        parse_mode="Markdown")
+        return
+
     config = get_config_data()
     admin_username = config.get("admin_contact_username", "@Admin")
     help_text = (
@@ -470,6 +567,13 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ----------- Payment Flow (coin package -> payment method -> receipt) -----------
 # MODIFIED: Entry point for conversation from the reply keyboard.
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # NEW: Global Bot Status Check
+    if is_bot_closed():
+        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
+                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
+                                        parse_mode="Markdown")
+        return ConversationHandler.END
+
     user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
@@ -711,13 +815,29 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
             text=f"🎉Your balance {coins_to_add} coin top up Successful. New balance: {new_balance} Coins.",
         )
         
-        # Admin Notification (Request 2)
-        admin_success_msg = f"✅ Approved and {display_username} balance {coins_to_add} coin Successful. Total Balance: {new_balance} Coins."
-        await query.message.reply_text(admin_success_msg)
+        # Admin Notification: Edit the original message to show 'Processed' status (NEW)
+        # --------------------------------------------------------------------------------
+        admin_username = query.from_user.username or "Admin"
+        
+        # Build the processed message
+        processed_msg = (
+            f"✅ **APPROVED: {approved_amount} MMK**\n"
+            f"💰 Added **{coins_to_add} Coins** to user.\n"
+            f"User: {display_username} (id:`{user_id}`)\n"
+            f"Processed by: @{admin_username} (id:`{query.from_user.id}`)\n"
+            f"Time: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        )
+        
+        # Edit the previous message
+        await query.message.edit_text(
+            text=processed_msg,
+            parse_mode="Markdown"
+        )
+        # --------------------------------------------------------------------------------
         
     except Exception as e:
-        logger.error("Failed to notify user after approval: %s", e)
-        await query.message.reply_text("Approved but failed to notify user.")
+        logger.error("Failed to notify user or edit admin message after approval: %s", e)
+        await query.message.reply_text(f"Approved but failed to notify user or edit message. Error: {e}")
 
 
 async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -768,10 +888,24 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
             chat_id=user_id,
             text="❌ Admin has denied your payment/receipt. Please contact support or retry the payment.",
         )
-        await query.message.reply_text("❌ Denied and user notified.")
+        
+        # Admin Notification: Edit the original message to show 'Denied' status (NEW)
+        admin_username = query.from_user.username or "Admin"
+        processed_msg = (
+            f"❌ **DENIED**\n"
+            f"User: {get_user_data_from_sheet(user_id).get('username', f'id:{user_id}')}\n"
+            f"Processed by: @{admin_username} (id:`{query.from_user.id}`)\n"
+            f"Time: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        )
+
+        await query.message.edit_text(
+            text=processed_msg,
+            parse_mode="Markdown"
+        )
+
     except Exception as e:
-        logger.error("Failed to notify user after denial: %s", e)
-        await query.message.reply_text("Denied but failed to notify user.")
+        logger.error("Failed to notify user or edit admin message after denial: %s", e)
+        await query.message.reply_text("Denied but failed to notify user or edit message.")
 
 
 # ----------- Product purchase flow (NEW CANCEL BUTTONS ADDED) -----------
@@ -858,6 +992,15 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
 async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
+    
+    # NEW: Global Bot Status Check
+    if is_bot_closed():
+        await update.message.reply_text("⛔ **Maintenance Mode**\n\n"
+                                        "ဝန်ဆောင်မှုအား မွမ်းမံခြင်းပြုလုပ်နေသည်အတွက် အချိန်အနည်းငယ်စောင့်ဆိုင်းပြီးမှ ပြန်လာပါခင်ဗျာ။",
+                                        reply_markup=MAIN_MENU_KEYBOARD,
+                                        parse_mode="Markdown")
+        return ConversationHandler.END
+
 
     if is_user_banned(user_id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။", reply_markup=MAIN_MENU_KEYBOARD)
@@ -966,16 +1109,23 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=MAIN_MENU_KEYBOARD # Show main menu keyboard on success
     )
     try:
+        # MODIFIED: Updated Admin notification message formatting (Request 6)
         admin_msg = (
-            f"🛒 New Order\n"
-            f"Order ID: {order['order_id']}\n"
-            f"User: @{user.username or user.full_name} (id:{user_id})\n"
-            f"Product: {product_key}\n"
-            f"Price: {price_mmk_needed} MMK ({price_needed_coins} Coins deducted)\n"
-            f"Phone: {premium_phone}\n"
-            f"Username: {premium_username}\n"
+            f"🛒 New Order\n\n"
+            
+            f"📝 Order ID: `{order['order_id']}`\n"
+            f"♦️ User: @{user.username or user.full_name} (id:`{user_id}`)\n"
+            f"________________________________\n\n"
+            
+            f"💾 Product: `{product_key}`\n"
+            f"💰 Price: {price_mmk_needed} MMK ({price_needed_coins} Coins deducted)\n\n"
+            
+            f"☎️ Phone: `{premium_phone}`\n"
+            f"🎭 Username: {premium_username}\n"
+            f"________________________________"
         )
-        await context.bot.send_message(chat_id=admin_id_check, text=admin_msg)
+        
+        await context.bot.send_message(chat_id=admin_id_check, text=admin_msg, parse_mode="Markdown")
     except Exception as e:
         logger.error("Failed to notify admin about order: %s", e)
 
@@ -990,15 +1140,23 @@ async def cancel_product_order(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-# MODIFIED: Global back to service menu (menu_back) now only returns to the main Reply Keyboard
+# MODIFIED: Global back to service menu (menu_back) now only returns to the appropriate Reply Keyboard
 async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    welcome_text = "Welcome back to the main menu. Choose from the options below."
+    user_id = query.from_user.id
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    if user_id == admin_id_check:
+        reply_markup = ADMIN_MENU_KEYBOARD # Admin: Show Admin Keyboard
+        welcome_text = "Returned to Admin Menu."
+    else:
+        reply_markup = MAIN_MENU_KEYBOARD # User: Show Main Menu Keyboard
+        welcome_text = "Welcome back to the main menu. Choose from the options below."
 
-    # Use reply_text which sends a new message with the Reply Keyboard.
-    # The new Reply Keyboard contains "Premium & Star" and "Help Center".
+
     try:
         # Delete the previous inline message if possible
         await query.message.delete()
@@ -1008,9 +1166,195 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     await context.bot.send_message(
         chat_id=query.from_user.id,
         text=welcome_text,
-        reply_markup=MAIN_MENU_KEYBOARD,
+        reply_markup=reply_markup, # Use conditional markup
     )
     return ConversationHandler.END # Exit any active conversation state
+
+
+# NEW: Handler for '⚙️ Close to Selling' button
+async def start_close_to_selling(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    if user.id != admin_id_check:
+        await update.message.reply_text("You are not authorized to use this feature.")
+        return
+
+    current_status = config.get('bot_status', 'active').upper()
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 Active (Open Bot)", callback_data="set_status_active")],
+        [InlineKeyboardButton("⛔ Close (Maintenance)", callback_data="set_status_closed")]
+    ])
+    
+    await update.message.reply_text(
+        f"⚙️ **Bot Status Management**\n\n"
+        f"Current Status: **{current_status}**\n\n"
+        f"Choose the new status:",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+# NEW: Callback handler for setting the status
+async def set_new_bot_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data.split("_") # e.g., set_status_active
+    new_status = data[-1]
+    
+    is_success = set_bot_status(new_status)
+    
+    if is_success:
+        status_text = "🟢 ACTIVE (Bot is Open)" if new_status == 'active' else "⛔ CLOSED (Maintenance Mode)"
+        
+        await query.message.edit_text(
+            f"✅ **Status Updated!**\n\n"
+            f"New Bot Status is: **{status_text}**.\n"
+            f"Users will now see the appropriate message.",
+            parse_mode="Markdown"
+        )
+    else:
+        await query.message.edit_text("❌ Failed to update the bot status in the Google Sheet.")
+
+
+# NEW: Handler for '👾 Broadcast' button
+async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+
+    if user.id != admin_id_check:
+        await update.message.reply_text("You are not authorized to use this feature.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "📝 **Broadcast Mode**\n\n"
+        "Please send the **Message and Photo** you want to broadcast to all users in *one single message*.\n"
+        "The photo must be attached to the message with a caption (text).\n\n"
+        "Click '❌ Cancel Admin Action' to stop.",
+        reply_markup=ADMIN_CANCEL_KEYBOARD,
+        parse_mode="Markdown"
+    )
+    return BROADCAST_WAITING_FOR_CONTENT
+
+
+# NEW: Handler to receive content and start confirmation
+async def receive_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+
+    # Must contain both photo and caption/text
+    if not (update.message.photo and update.message.caption):
+        await update.message.reply_text(
+            "❌ Invalid input. Please send the message and photo in *one message* (photo with caption/text)."
+        )
+        return BROADCAST_WAITING_FOR_CONTENT # Wait again
+
+    # Store content
+    context.user_data["broadcast_photo_id"] = update.message.photo[-1].file_id # Largest photo size
+    context.user_data["broadcast_caption"] = update.message.caption
+    
+    # Get total user count (excluding header row)
+    total_users_count = len(WS_USER_DATA.get_all_records()) if WS_USER_DATA else 0
+    if total_users_count > 0:
+        # Subtract the header row.
+        total_users_count -= 1 
+    
+    # Send confirmation message with the content
+    confirm_text = (
+        f"✅ **Confirmation**\n\n"
+        f"You are about to send this message to **ALL {total_users_count} users** (approximate, excluding header row and banned/admin).\n"
+        f"Do you want to proceed?"
+    )
+    confirmation_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Send Broadcast NOW", callback_data="broadcast_confirm_yes")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="broadcast_confirm_no")]
+    ])
+    
+    # Send the photo and caption back to admin for confirmation
+    await context.bot.send_photo(
+        chat_id=user.id,
+        photo=context.user_data["broadcast_photo_id"],
+        caption=confirm_text + "\n\n---\n" + context.user_data["broadcast_caption"],
+        reply_markup=confirmation_kb,
+        parse_mode="Markdown"
+    )
+
+    return BROADCAST_CONFIRMATION
+
+
+# NEW: Handler for final confirmation and execution
+async def finalize_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "broadcast_confirm_no":
+        await query.message.edit_text("❌ Broadcast cancelled.")
+        # Send Admin Menu Keyboard explicitly since this is a CallbackQueryHandler
+        await context.bot.send_message(query.from_user.id, "Returned to Admin Menu.", reply_markup=ADMIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+
+    # Start sending
+    await query.message.edit_text("⏳ **Broadcast started...** This may take a few minutes.", parse_mode="Markdown")
+    
+    photo_id = context.user_data.get("broadcast_photo_id")
+    caption = context.user_data.get("broadcast_caption")
+    
+    # Fetch Admin ID once
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    user_rows = WS_USER_DATA.get_all_records()
+    total_users = 0
+    success_count = 0
+    fail_count = 0
+    
+    for row in user_rows:
+        try:
+            target_id = int(row.get("user_id"))
+            if target_id == admin_id_check:
+                continue # Skip admin
+            if row.get("banned", "FALSE").upper() == "TRUE":
+                continue # Skip banned users
+            
+            total_users += 1
+            # Send photo/caption
+            await context.bot.send_photo(
+                chat_id=target_id,
+                photo=photo_id,
+                caption=caption,
+                parse_mode="Markdown" # Ensure markdown is supported in broadcast
+            )
+            success_count += 1
+            # Add a small delay to respect Telegram's rate limits
+            await asyncio.sleep(0.05) 
+        except Exception as e:
+            # Catch exceptions like 'Bot blocked by user' or 'Chat not found'
+            if "blocked by the user" in str(e) or "chat not found" in str(e):
+                 logger.info("User %s blocked the bot. Skipping.", row.get("user_id"))
+            else:
+                 logger.error("Failed to send broadcast to user %s: %s", row.get("user_id"), e)
+                 fail_count += 1
+
+    final_msg = (
+        f"✅ **Broadcast Complete!**\n"
+        f"Total Users Targeted: {total_users}\n"
+        f"Successful Sends: {success_count}\n"
+        f"Failed/Blocked Sends: {fail_count}"
+    )
+    
+    await query.message.reply_text(final_msg, reply_markup=ADMIN_MENU_KEYBOARD, parse_mode="Markdown")
+    return ConversationHandler.END
+
+
+# NEW: Cancel handler for Admin actions
+async def cancel_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "❌ Admin action cancelled. You have returned to the Admin Menu.",
+        reply_markup=ADMIN_MENU_KEYBOARD
+    )
+    return ConversationHandler.END
 
 
 # Admin commands (ban/unban) - Updated to use config ID
@@ -1148,12 +1492,37 @@ def main():
     )
     application.add_handler(product_purchase_handler)
 
+    # Admin Broadcast Conversation Handler (NEW)
+    broadcast_conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Text("👾 Broadcast"), start_broadcast)],
+        states={
+            BROADCAST_WAITING_FOR_CONTENT: [
+                MessageHandler(filters.Text("❌ Cancel Admin Action"), cancel_admin_action),
+                MessageHandler(filters.PHOTO & filters.Caption, receive_broadcast_content), # Photo + Caption Required
+            ],
+            BROADCAST_CONFIRMATION: [
+                CallbackQueryHandler(finalize_broadcast, pattern=r"^broadcast_confirm_")
+            ],
+        },
+        fallbacks=[
+            MessageHandler(filters.Text("❌ Cancel Admin Action"), cancel_admin_action),
+            # MessageHandler(filters.Regex(r".*"), cancel_admin_action) # Catch any other text input as implicit cancel
+        ],
+        allow_reentry=True,
+    )
+    application.add_handler(broadcast_conv_handler)
+
+
     # Message handlers for reply keyboard
     application.add_handler(MessageHandler(filters.Text("👤 User Info"), handle_user_info))
     application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center))
     
     # NEW: Handler for the "Premium & Star" Reply Button
     application.add_handler(MessageHandler(filters.Text("✨ Premium & Star"), show_product_inline_menu))
+    
+    # NEW: Handler for the "Close to Selling" Admin Button
+    application.add_handler(MessageHandler(filters.Text("⚙️ Close to Selling"), start_close_to_selling))
+    application.add_handler(CallbackQueryHandler(set_new_bot_status_callback, pattern=r"^set_status_"))
     
     # Inline callbacks: products
     application.add_handler(CallbackQueryHandler(start_product_purchase, pattern=r"^product_"))
