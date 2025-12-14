@@ -1496,7 +1496,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
     await update.message.reply_text(
         "👾 **BROADCAST MESSAGE**\n\n"
-        "Please send the **message (text or photo + caption)** you want to broadcast to all users.",
+        "Please send the **message (text, photo, video, GIF, or sticker)** you want to broadcast to all users.",
         parse_mode="Markdown",
         reply_markup=ADMIN_CANCEL_KEYBOARD
     )
@@ -1510,42 +1510,113 @@ async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     return ConversationHandler.END
 
+# MODIFIED: Logic to handle all media types (Photo, Video, GIF, Sticker, Text)
 async def confirm_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     message = update.effective_message
     
+    # 1. Determine media type and file ID
+    media_type = None
+    file_id = None
+    
+    if message.photo:
+        media_type = 'photo'
+        file_id = message.photo[-1].file_id
+    elif message.video:
+        media_type = 'video'
+        file_id = message.video.file_id
+    elif message.animation: # Handles GIFs
+        media_type = 'animation'
+        file_id = message.animation.file_id
+    elif message.sticker:
+        media_type = 'sticker'
+        file_id = message.sticker.file_id
+    elif message.text:
+        media_type = 'text'
+        # No file_id needed for pure text message
+
+    # Check for text/caption or media file
+    if not media_type:
+        await update.message.reply_text(
+            "⚠️ **Error:** Unsupported message type. Please send text, photo, video, GIF, or sticker.",
+            reply_markup=ADMIN_CANCEL_KEYBOARD
+        )
+        return AWAIT_BROADCAST_CONTENT # Remain in the same state
+        
     # Store message details in user_data
+    # Use a placeholder text if no text/caption is present
+    stored_text = message.text_html or message.caption_html or '*(No caption/text provided)*'
+    
     context.user_data['broadcast_message'] = {
-        'text': message.text_html or message.caption_html,
-        'photo_file_id': message.photo[-1].file_id if message.photo else None,
-        'has_photo': bool(message.photo),
+        'type': media_type,
+        'text': stored_text,
+        'file_id': file_id,
+        'has_media': media_type != 'text',
+        # Store original update message for forwarding, if needed (complex case)
+        'forward_message_id': message.message_id 
     }
 
-    # Prepare confirmation message
+    # 2. Prepare confirmation message
     confirm_text = "✅ **Broadcast Content Received.**\n\n"
-    if message.photo:
-        confirm_text += "*(Photo attached)*\n"
     
-    confirm_text += f"**Content (HTML):**\n{message.text_html or message.caption_html or 'No Text Provided'}"
+    # Display message type information
+    if media_type == 'photo':
+        confirm_text += "*(Photo attached)*\n"
+    elif media_type == 'video':
+        confirm_text += "*(Video attached)*\n"
+    elif media_type == 'animation':
+        confirm_text += "*(GIF/Animation attached)*\n"
+    elif media_type == 'sticker':
+        confirm_text += "*(Sticker attached - Note: Stickers cannot have captions)*\n"
+        # For stickers, we only show the file_id, not the text (which will be the placeholder)
+        if stored_text.startswith("*("): # Check if it's the placeholder text
+             stored_text = "N/A" # Do not show the placeholder for sticker confirmation
+             
+    if media_type != 'sticker':
+         confirm_text += f"**Content (HTML):**\n{stored_text}"
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 CONFIRM AND SEND BROADCAST", callback_data="broadcast_send")],
         [InlineKeyboardButton("⬅️ Cancel Broadcast", callback_data="broadcast_cancel")]
     ])
     
-    # Send confirmation back to Admin
-    if message.photo:
-        await context.bot.send_photo(
+    # 3. Send confirmation back to Admin
+    
+    # If it's a media type that supports caption (Photo, Video, GIF), send the media with the confirmation text as caption.
+    if media_type in ['photo', 'video', 'animation']:
+        send_method = {
+            'photo': context.bot.send_photo,
+            'video': context.bot.send_video,
+            'animation': context.bot.send_animation
+        }.get(media_type)
+        
+        await send_method(
             chat_id=update.effective_chat.id,
-            photo=message.photo[-1].file_id,
+            photo=file_id, # This works for photo, video, and animation (as input_file_id)
             caption=confirm_text,
             parse_mode="HTML",
             reply_markup=keyboard
         )
+    elif media_type == 'sticker':
+        # Stickers do not support captions. Send the sticker, then follow up with the confirmation text.
+        await context.bot.send_sticker(
+            chat_id=update.effective_chat.id,
+            sticker=file_id
+        )
+        await update.message.reply_text(
+            f"{confirm_text}\n\n*Sticker sent above. Confirm broadcast?*",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
     else:
+        # Pure text message
         await update.message.reply_text(confirm_text, parse_mode="HTML", reply_markup=keyboard)
         
     # Remove the temporary keyboard for confirmation step
-    await update.message.reply_text("Please confirm the broadcast.", reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True))
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Please confirm the broadcast.", 
+        reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
+    )
 
     return CONFIRM_BROADCAST
 
@@ -1570,22 +1641,28 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     failed_count = 0
     
     await query.message.edit_text("🚀 Starting broadcast... This may take a moment.", reply_markup=None)
+    
+    # Extract data for sending
+    media_type = message_data['type']
+    file_id = message_data['file_id']
+    text = message_data['text'] if not message_data['text'].startswith('*(') else None # Use None if it's the placeholder text
+    has_media = message_data['has_media']
 
     for user_id in all_user_ids:
         try:
-            if message_data['has_photo']:
-                await context.bot.send_photo(
-                    chat_id=user_id,
-                    photo=message_data['photo_file_id'],
-                    caption=message_data['text'],
-                    parse_mode="HTML"
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=message_data['text'],
-                    parse_mode="HTML"
-                )
+            if media_type == 'photo':
+                await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=text, parse_mode="HTML")
+            elif media_type == 'video':
+                await context.bot.send_video(chat_id=user_id, video=file_id, caption=text, parse_mode="HTML")
+            elif media_type == 'animation':
+                await context.bot.send_animation(chat_id=user_id, animation=file_id, caption=text, parse_mode="HTML")
+            elif media_type == 'sticker':
+                # Stickers do not support text/caption
+                await context.bot.send_sticker(chat_id=user_id, sticker=file_id)
+            elif media_type == 'text':
+                # Pure text message (use message_data['text'] which is guaranteed to be real text here)
+                await context.bot.send_message(chat_id=user_id, text=message_data['text'], parse_mode="HTML")
+            
             sent_count += 1
             # Add a small delay to avoid hitting Telegram's flood limits for sending messages
             time.sleep(0.05) 
@@ -1648,6 +1725,10 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("cancel", cancel_product_order)) # NEW: Handle /cancel command
 
+    # Admin commands (legacy /ban /unban) - REMOVED AS REQUESTED TO FIX NAMEERROR
+    # application.add_handler(CommandHandler("ban", admin_ban_user))
+    # application.add_handler(CommandHandler("unban", admin_unban_user))
+    
     # Admin Inline Callback Handlers
     application.add_handler(CallbackQueryHandler(set_bot_status_callback, pattern=r"^set_status_"))
     application.add_handler(CallbackQueryHandler(toggle_ban_callback, pattern=r"^toggleban\|"))
@@ -1734,12 +1815,13 @@ def main():
     )
     application.add_handler(user_search_handler)
     
-    # NEW: Broadcast Conversation Handler
+    # NEW: Broadcast Conversation Handler (Updated to filters.ALL)
     broadcast_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("👾 Broadcast"), start_broadcast)],
         states={
             AWAIT_BROADCAST_CONTENT: [
-                MessageHandler(filters.PHOTO | filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), confirm_broadcast_content)
+                # Accept all messages except commands and the cancel button text
+                MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), confirm_broadcast_content)
             ],
             CONFIRM_BROADCAST: [
                 CallbackQueryHandler(execute_broadcast, pattern=r"broadcast_send|broadcast_cancel")
