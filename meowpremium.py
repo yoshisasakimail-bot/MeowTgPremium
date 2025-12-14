@@ -517,10 +517,14 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_contact_id = get_dynamic_admin_id(config)
     
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    # FIX: Use a short Unix timestamp for callback data to avoid Button_data_invalid error
+    short_ts = int(time.time())
+    
     receipt_meta = {
         "from_user_id": user.id,
         "from_username": user.username or user.full_name,
         "timestamp": timestamp,
+        "short_ts": short_ts, # Store short timestamp
         "package": context.user_data.get("selected_coinpkg"),
     }
     context.user_data["last_receipt_meta"] = receipt_meta
@@ -556,13 +560,15 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb_rows = []
         row = []
         for i, amt in enumerate(choices):
-            row.append(InlineKeyboardButton(f"✅ Approve {amt} MMK", callback_data=f"admin_approve_receipt|{user.id}|{timestamp}|{amt}"))
+            # Use short_ts in callback_data
+            row.append(InlineKeyboardButton(f"✅ Approve {amt} MMK", callback_data=f"admin_approve_receipt|{user.id}|{short_ts}|{amt}"))
             if len(row) == 2:
                 kb_rows.append(row)
                 row = []
         if row:
             kb_rows.append(row)
-        kb_rows.append([InlineKeyboardButton("❌ Deny", callback_data=f"admin_deny_receipt|{user.id}|{timestamp}")])
+        # Use short_ts in callback_data
+        kb_rows.append([InlineKeyboardButton("❌ Deny", callback_data=f"admin_deny_receipt|{user.id}|{short_ts}")])
 
         await context.bot.send_message(
             chat_id=admin_contact_id,
@@ -579,20 +585,24 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# Admin callbacks for receipts (unchanged)
+# Admin callbacks for receipts (updated to handle short_ts)
 async def admin_approve_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # admin_approve_receipt|<user_id>|<timestamp>|<amount>
+    data = query.data  # admin_approve_receipt|<user_id>|<short_ts>|<amount>
     parts = data.split("|")
     if len(parts) < 4:
         await query.message.reply_text("Invalid admin action.")
         return
 
-    _, user_id_str, ts, amount_str = parts[0], parts[1], parts[2], parts[3]
+    # short_ts_str now contains the Unix timestamp (string format)
+    _, user_id_str, short_ts_str, amount_str = parts[0], parts[1], parts[2], parts[3]
     try:
         user_id = int(user_id_str)
         approved_amount = int(amount_str)
+        # Convert short_ts back to human-readable format for logging
+        unix_to_dt = datetime.datetime.fromtimestamp(int(short_ts_str))
+        ts_human_readable = unix_to_dt.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         await query.message.reply_text("Invalid parameters.")
         return
@@ -636,7 +646,7 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         "premium_username": "",
         "status": "APPROVED_RECEIPT",
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "notes": f"Receipt approved by admin {query.from_user.id} at {ts}",
+        "notes": f"Receipt approved by admin {query.from_user.id} at {ts_human_readable}", # Use human-readable time
         "processed_by": str(query.from_user.id),
     }
     log_order(order)
@@ -660,11 +670,16 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
     if len(parts) < 3:
         await query.message.reply_text("Invalid admin action.")
         return
-    _, user_id_str, ts = parts
+    
+    # short_ts_str now contains the Unix timestamp (string format)
+    _, user_id_str, short_ts_str = parts
     try:
         user_id = int(user_id_str)
+        # Convert short_ts back to human-readable format for logging
+        unix_to_dt = datetime.datetime.fromtimestamp(int(short_ts_str))
+        ts_human_readable = unix_to_dt.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
-        await query.message.reply_text("Invalid user id.")
+        await query.message.reply_text("Invalid user id or timestamp.")
         return
 
     config = get_config_data()
@@ -685,7 +700,7 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         "premium_username": "",
         "status": "DENIED_RECEIPT",
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "notes": f"Receipt denied by admin {query.from_user.id} at {ts}",
+        "notes": f"Receipt denied by admin {query.from_user.id} at {ts_human_readable}", # Use human-readable time
         "processed_by": str(query.from_user.id),
     }
     log_order(order)
