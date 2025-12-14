@@ -274,11 +274,16 @@ def get_product_keyboard(product_type: str) -> InlineKeyboardMarkup:
     keyboard_buttons = []
     prefix = f"{product_type}_"
     product_keys = sorted([k for k in config.keys() if k.startswith(prefix)])
+    
+    # NEW: Use ❄️ for Premium
+    icon = '⭐' if product_type == 'star' else '❄️' 
+    
     for key in product_keys:
         price = config.get(key)
         if price:
             button_name = key.replace(prefix, "").replace("_", " ").title()
-            button_text = f"{'⭐' if product_type == 'star' else '💎'} {button_name} ({price} MMK)"
+            # MODIFIED: Use the updated icon
+            button_text = f"{icon} {button_name} ({price} MMK)" 
             keyboard_buttons.append([InlineKeyboardButton(button_text, callback_data=f"{key}")])
 
     # Go back to the menu where the 'Premium & Star' button is visible
@@ -329,7 +334,7 @@ MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(ENGLISH_REPLY_KEYBOARD, resize_keyboard
 PRODUCT_SELECTION_INLINE_KEYBOARD = InlineKeyboardMarkup(
     [
         [InlineKeyboardButton("⭐ Telegram Star", callback_data="product_star")],
-        [InlineKeyboardButton("💎 Telegram Premium", callback_data="product_premium")],
+        [InlineKeyboardButton("❄️ Telegram Premium", callback_data="product_premium")], # MODIFIED: Changed to ❄️
         [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")] # Added back button
     ]
 )
@@ -367,7 +372,7 @@ def parse_amount_from_text(text: str) -> Optional[int]:
 
 
 # ------------ Handlers ----------------
-# MODIFIED: start_command only sends the reply keyboard (no inline menu)
+# MODIFIED: start_command uses the new welcome message format
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     register_user_if_not_exists(user.id, user.full_name)
@@ -375,7 +380,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Keep Burmese ban message as it is likely crucial for the audience
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားထားသည်။ Support ထံ ဆက်သွယ်ပါ။")
         return
-    welcome_text = f"Hello, **{user.full_name}**!\nWelcome — choose from the menu below."
+    # MODIFIED: Updated welcome message format (Request 5)
+    welcome_text = (
+        f"Hello, 👑**{user.full_name}**\n\n"
+        f"🧸Welcome — Meow Telegram Bot 🫶\n"
+        f"To make a purchase with excellent service and advanced functionality, choose from the menu below."
+    )
     # Send the main menu reply keyboard
     await update.message.reply_text(welcome_text, reply_markup=MAIN_MENU_KEYBOARD, parse_mode="Markdown")
 
@@ -543,16 +553,19 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Build approve buttons with amounts from config or defaults
         amounts_cfg = config.get("receipt_approve_amounts", "")
+        # MODIFIED: Use the new requested default amounts (Request 1)
+        default_choices = [19000, 20000, 50000, 100000]
+
         if amounts_cfg:
             try:
                 # ဤနေရာတွင် စာလုံးမှားယွင်းပါက ValueError တက်ပါသည်။
                 choices = [int(x.strip()) for x in amounts_cfg.split(",") if x.strip().isdigit()]
             except Exception:
                 # Configuration မှားယွင်းပါက Default သို့ ပြန်သွားပါမည်။
-                choices = [2000, 4000, 10000, 20000]
+                choices = default_choices
 
         else:
-            choices = [2000, 4000, 10000, 20000]
+            choices = default_choices
 
         if detected_amount and detected_amount not in choices:
             choices = [detected_amount] + choices
@@ -586,7 +599,7 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# Admin callbacks for receipts (updated to handle short_ts)
+# Admin callbacks for receipts (updated to handle short_ts and new messages)
 async def admin_approve_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -651,13 +664,27 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         "processed_by": str(query.from_user.id),
     }
     log_order(order)
+    
+    # Get the user's username for the admin message
+    display_username = user_data.get("username", str(user_id))
+    # Prepend '@' if it's a valid username (not 'N/A' or just the user ID string)
+    if display_username != "N/A" and not str(user_id) in display_username:
+        display_username = f"@{display_username}"
+    # If still 'N/A', just use the user ID as a fallback
+    if display_username == "N/A":
+         display_username = f"id:{user_id}" 
 
     try:
+        # User Notification (Request 3)
         await context.bot.send_message(
             chat_id=user_id,
-            text=f"✅ Your payment of {approved_amount} MMK has been approved by admin. {coins_to_add} Coins added. New balance: {new_balance} Coins.",
+            text=f"🎉Your balance {coins_to_add} coin top up Successful. New balance: {new_balance} Coins.",
         )
-        await query.message.reply_text("✅ Approved and user balance updated.")
+        
+        # Admin Notification (Request 2)
+        admin_success_msg = f"✅ Approved and {display_username} balance {new_balance} coin Successful."
+        await query.message.reply_text(admin_success_msg)
+        
     except Exception as e:
         logger.error("Failed to notify user after approval: %s", e)
         await query.message.reply_text("Approved but failed to notify user.")
