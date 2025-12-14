@@ -1,13 +1,12 @@
 # Core Telegram Bot & Webhooks
-python-telegram-bot[webhooks]==20.6
+python-telegram-bot[webhooks]
 
 # Google Sheets Dependencies
-gspread==6.0.2
-gspread-asyncio==1.10.0
-google-auth==2.23.4
-google-auth-oauthlib==1.1.0
-requests==2.31.0
-
+gspread
+gspread-asyncio
+google-auth
+google-auth-oauthlib
+requests
 # OCR Dependencies (Google Cloud Vision ကို အသုံးပြုရန် ယူဆထားပါသည်)
-google-cloud-vision==3.4.0
-Pillow==10.1.0
+google-cloud-vision
+Pillow
