@@ -1,2 +1,6 @@
 python-telegram-bot[webhooks]
 gspread
+gspread-asyncio
+google-auth
+google-auth-oauthlib
+requests
