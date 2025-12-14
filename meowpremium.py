@@ -6,8 +6,7 @@ import datetime
 import re
 import uuid
 from typing import Dict, Optional
-import gspread
-from google.auth.transport.requests import Request
+# gspread, google.auth module များကို ဖယ်ရှားသည်။
 from telegram import (
     Update,
     InlineKeyboardMarkup,
@@ -32,22 +31,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------- ENV / Globals -----------------
-# MODIFIED: Define ADMIN_ID_DEFAULT for explicit fallback
+# ADMIN_ID_DEFAULT ကို Define လုပ်ထားသည်။
 ADMIN_ID_DEFAULT = 123456789
-ADMIN_ID = int(os.environ.get("ADMIN_ID", ADMIN_ID_DEFAULT)) # Keep ADMIN_ID as the initial default/fallback from ENV
-SHEET_ID = os.environ.get("SHEET_ID", "")
-GSPREAD_SA_JSON = os.environ.get("GSPREAD_SA_JSON", "")
+# ADMIN_ID ကို ENV မှ တိုက်ရိုက်ယူသည်။ SHEET_ID/GSPREAD_SA_JSON တို့ကို ဖယ်ရှားသည်။
+ADMIN_ID = int(os.environ.get("ADMIN_ID", ADMIN_ID_DEFAULT))
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 PORT = int(os.environ.get("PORT", "8080"))
 
-# Sheets global objects (initialized later)
-GSHEET_CLIENT: Optional[gspread.Client] = None
-WS_USER_DATA = None
-WS_CONFIG = None
-WS_ORDERS = None
+# Sheets global objects များကို ဖယ်ရှားသည်။ (Sheet မသုံးတော့သောကြောင့်)
+# GSHEET_CLIENT: Optional[gspread.Client] = None
+# WS_USER_DATA = None
+# WS_CONFIG = None
+# WS_ORDERS = None
 
-# Config cache
+# Config cache နှင့်ပတ်သက်သော code များကို ဖယ်ရှားသည်။
 CONFIG_CACHE: Dict = {"data": {}, "ts": 0}
 CONFIG_TTL_SECONDS = int(os.environ.get("CONFIG_TTL_SECONDS", "25"))
 
@@ -62,62 +60,40 @@ CONFIG_TTL_SECONDS = int(os.environ.get("CONFIG_TTL_SECONDS", "25"))
 ) = range(6)
 
 # ------------ Helper: Retry wrapper for sheet init ----------------
-def initialize_sheets(retries: int = 3, backoff: float = 2.0) -> bool:
-    global GSHEET_CLIENT, WS_USER_DATA, WS_CONFIG, WS_ORDERS
+# initialize_sheets function ကို ဖယ်ရှားသည်။
 
-    if not GSPREAD_SA_JSON:
-        logger.error("GSPREAD_SA_JSON environment variable not set.")
-        return False
-    if not SHEET_ID:
-        logger.error("SHEET_ID environment variable not set.")
-        return False
+# ------------ Config reading & caching: Mock functions ----------------
+# Google Sheet မသုံးတော့သော်လည်း၊ config, user data, order log function များသည် ရှိနေရမည်။
+# ထို့ကြောင့် config/user data များကို hardcode/mock ပြုလုပ်ထားပါသည်။
+# * သတိပြုရန်: ဤဖိုင်သည် Google Sheet ကို အသုံးပြုခြင်း မရှိတော့သောကြောင့် 
+# * user data (ဥပမာ: coin balance) နှင့် order history များသည် သိမ်းဆည်းနိုင်မည် မဟုတ်ပါ။ 
+# * အကယ်၍ Database မရှိပါက Bot ကို restart လုပ်တိုင်း data များ ပျောက်ဆုံးသွားပါမည်။
 
-    last_exc = None
-    for attempt in range(1, retries + 1):
-        try:
-            sa_credentials = json.loads(GSPREAD_SA_JSON)
-            GSHEET_CLIENT = gspread.service_account_from_dict(sa_credentials)
-            sheet = GSHEET_CLIENT.open_by_key(SHEET_ID)
-
-            WS_USER_DATA = sheet.worksheet("user_data")
-            WS_CONFIG = sheet.worksheet("config")
-            WS_ORDERS = sheet.worksheet("orders")
-
-            logger.info("✅ Google Sheets initialized successfully.")
-            return True
-        except Exception as e:
-            last_exc = e
-            logger.warning(
-                f"Attempt {attempt}/{retries} - failed to initialize Google Sheets: {e}"
-            )
-            time.sleep(backoff * attempt)
-
-    logger.error("❌ Could not initialize Google Sheets after retries: %s", last_exc)
-    return False
-
-
-# ------------ Config reading & caching ----------------
 def _read_config_sheet() -> Dict[str, str]:
-    global WS_CONFIG
-    out = {}
-    if not WS_CONFIG:
-        logger.warning("WS_CONFIG is not initialized.")
-        return out
-    try:
-        records = WS_CONFIG.get_all_records()
-        for item in records:
-            k = item.get("key")
-            v = item.get("value")
-            if k is not None and v is not None:
-                out[str(k).strip()] = str(v).strip()
-    except Exception as e:
-        logger.error("Error reading config sheet: %s", e)
-    return out
+    # Config sheet ကို hardcode လုပ်သည် (သို့မဟုတ်) Sheet မသုံးလိုပါက ဤနေရာတွင် Hardcode data ထည့်သွင်းရမည်။
+    # Sheet ကို အသုံးပြုခြင်း မရှိတော့ပါက ဒီ Mock Data ကို အသုံးျပုရပါမည်။
+    # Admin username ကို ADMIN_ID ဖြင့် ပြောင်းလဲသည်။
+    return {
+        "admin_contact_username": f"@{ADMIN_ID}", # Admin ID ကို hardcode ထည့်သည်။
+        "star_100": "20000",
+        "star_50": "10000",
+        "premium_1month": "15000",
+        "premium_3month": "40000",
+        "coinpkg_1000": "2000",
+        "coinpkg_2000": "4000",
+        "kpay_name": "Kpay User",
+        "kpay_phone": "09987654321",
+        "wave_name": "Wave User",
+        "wave_phone": "09123456789",
+        "mmk_to_coins_ratio": "0.5",
+        "receipt_approve_amounts": "2000, 4000, 10000, 20000",
+    }
 
 
 def get_config_data(force_refresh: bool = False) -> Dict[str, str]:
     global CONFIG_CACHE
     now = time.time()
+    # Sheet ကိုဖတ်ရန် မလိုတော့ဘဲ Mock data ကိုသာ ပြန်ပေးသည်။
     if force_refresh or (now - CONFIG_CACHE["ts"] > CONFIG_TTL_SECONDS):
         CONFIG_CACHE["data"] = _read_config_sheet()
         CONFIG_CACHE["ts"] = now
@@ -126,97 +102,77 @@ def get_config_data(force_refresh: bool = False) -> Dict[str, str]:
 
 # NEW Helper: Get Admin ID from config sheet, falling back to global default
 def get_dynamic_admin_id(config: Dict) -> int:
-    """Retrieves ADMIN_ID from config sheet, falls back to global ADMIN_ID."""
-    try:
-        # Try to get from config sheet, fallback to global ADMIN_ID (which is 123456789 or from Render ENV)
-        return int(config.get("admin_contact_id", ADMIN_ID))
-    except (ValueError, TypeError):
-        # If the value in the sheet is not a valid integer, use the global default
-        logger.warning("admin_contact_id in sheet is invalid or missing. Using fallback: %s", ADMIN_ID)
-        return ADMIN_ID
+    """Retrieves ADMIN_ID from global variable as sheet is no longer used."""
+    # Sheet မှ မယူဘဲ global ADMIN_ID ကို တိုက်ရိုက်ပြန်ပေးသည်။
+    return ADMIN_ID
 
 
-# ------------ User data helpers ----------------
+# ------------ User data helpers: Mocking Sheet Interaction ----------------
+# Sheet မသုံးတော့သောကြောင့် ဤ functions များသည် In-memory data ကို အသုံးပြုရမည် သို့မဟုတ် 
+# မည်သည့်အရာကိုမှ သိမ်းဆည်းနိုင်မည်မဟုတ်ကြောင်း သတိပြုရန်။
+# လက်ရှိတွင် ဤ helper များကို Mock ပြုလုပ်ထားပါသည်။
+
+# In-memory storage for user data (Volatile - will reset on restart)
+MOCK_USER_DATA = {}
+
 def find_user_row(user_id: int) -> Optional[int]:
-    global WS_USER_DATA
-    if not WS_USER_DATA:
-        return None
-    try:
-        cell = WS_USER_DATA.find(str(user_id), in_column=1)
-        if cell:
-            return cell.row
-    except Exception as e:
-        logger.debug("find_user_row exception: %s", e)
-    return None
+    # Mocking: Check if user exists in in-memory dict
+    return user_id if user_id in MOCK_USER_DATA else None
 
 
 def get_user_data_from_sheet(user_id: int) -> Dict[str, str]:
-    global WS_USER_DATA
     default = {"user_id": str(user_id), "username": "N/A", "coin_balance": "0", "registration_date": "N/A", "banned": "FALSE"}
-    if not WS_USER_DATA:
-        return default
-    try:
-        row = find_user_row(user_id)
-        if not row:
-            return default
-        row_values = WS_USER_DATA.row_values(row)
-        data = {
-            "user_id": row_values[0] if len(row_values) > 0 else str(user_id),
-            "username": row_values[1] if len(row_values) > 1 else "N/A",
-            "coin_balance": row_values[2] if len(row_values) > 2 else "0",
-            "registration_date": row_values[3] if len(row_values) > 3 else "N/A",
-            "last_active": row_values[4] if len(row_values) > 4 else "",
-            "total_purchase": row_values[5] if len(row_values) > 5 else "0",
-            "banned": row_values[6] if len(row_values) > 6 else "FALSE",
-        }
-        return data
-    except Exception as e:
-        logger.error("Error get_user_data_from_sheet: %s", e)
-        return default
+    # Mocking: return data from in-memory dict or default
+    data = MOCK_USER_DATA.get(user_id, default)
+    # Ensure keys are present even if from mock data
+    return {
+        "user_id": str(data.get("user_id", str(user_id))),
+        "username": data.get("username", "N/A"),
+        "coin_balance": str(data.get("coin_balance", "0")),
+        "registration_date": data.get("registration_date", "N/A"),
+        "last_active": data.get("last_active", ""),
+        "total_purchase": str(data.get("total_purchase", "0")),
+        "banned": data.get("banned", "FALSE"),
+    }
 
 
 def register_user_if_not_exists(user_id: int, username: str) -> None:
-    global WS_USER_DATA
-    if not WS_USER_DATA:
-        logger.error("WS_USER_DATA not available.")
-        return
-    try:
-        if find_user_row(user_id) is None:
-            now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            new_row = [str(user_id), username or "N/A", "0", now, now, "0", "FALSE"]
-            WS_USER_DATA.append_row(new_row, value_input_option="USER_ENTERED")
-            logger.info("Registered new user %s", user_id)
-    except Exception as e:
-        logger.error("Error registering user: %s", e)
+    if user_id not in MOCK_USER_DATA:
+        now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        MOCK_USER_DATA[user_id] = {
+            "user_id": str(user_id), 
+            "username": username or "N/A", 
+            "coin_balance": "0", 
+            "registration_date": now, 
+            "last_active": now,
+            "total_purchase": "0",
+            "banned": "FALSE"
+        }
+        logger.info("Registered new mock user %s", user_id)
+    else:
+        # Update last active time for existing user
+        MOCK_USER_DATA[user_id]["last_active"] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        # Update username if it changed
+        MOCK_USER_DATA[user_id]["username"] = username or "N/A"
 
 
 def update_user_balance(user_id: int, new_balance: int) -> bool:
-    global WS_USER_DATA
-    row = find_user_row(user_id)
-    if not row:
-        logger.error("update_user_balance: user row not found for %s", user_id)
-        return False
-    try:
-        WS_USER_DATA.update_cell(row, 3, str(new_balance))
-        WS_USER_DATA.update_cell(row, 5, datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"))
+    if user_id in MOCK_USER_DATA:
+        MOCK_USER_DATA[user_id]["coin_balance"] = str(new_balance)
+        MOCK_USER_DATA[user_id]["last_active"] = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info("Mock balance update for %s: %s", user_id, new_balance)
         return True
-    except Exception as e:
-        logger.error("Failed to update user balance: %s", e)
-        return False
+    logger.error("update_user_balance: mock user row not found for %s", user_id)
+    return False
 
 
 def set_user_banned_status(user_id: int, banned: bool) -> bool:
-    global WS_USER_DATA
-    row = find_user_row(user_id)
-    if not row:
-        logger.error("set_user_banned_status: user row not found for %s", user_id)
-        return False
-    try:
-        WS_USER_DATA.update_cell(row, 7, "TRUE" if banned else "FALSE")
+    if user_id in MOCK_USER_DATA:
+        MOCK_USER_DATA[user_id]["banned"] = "TRUE" if banned else "FALSE"
+        logger.info("Mock banned status update for %s: %s", user_id, MOCK_USER_DATA[user_id]["banned"])
         return True
-    except Exception as e:
-        logger.error("Failed to update banned status: %s", e)
-        return False
+    logger.error("set_user_banned_status: mock user row not found for %s", user_id)
+    return False
 
 
 def is_user_banned(user_id: int) -> bool:
@@ -224,35 +180,30 @@ def is_user_banned(user_id: int) -> bool:
     return str(data.get("banned", "FALSE")).upper() == "TRUE"
 
 
-# ------------ Orders logging ----------------
+# ------------ Orders logging: Mocking Sheet Interaction ----------------
+MOCK_ORDERS = [] # In-memory order log
+
 def log_order(order: Dict) -> bool:
-    global WS_ORDERS
-    if not WS_ORDERS:
-        logger.error("WS_ORDERS not initialized.")
-        return False
     try:
         order_id = order.get("order_id") or str(uuid.uuid4())
-        row = [
-            order_id,
-            order.get("user_id", ""),
-            order.get("username", ""),
-            order.get("product_key", ""),
-            str(order.get("price_mmk", "")),
-            order.get("phone", ""),
-            order.get("premium_username", ""),
-            order.get("status", "PENDING"),
-            order.get("timestamp", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
-            order.get("notes", ""),
-            order.get("processed_by", ""),
-        ]
-        WS_ORDERS.append_row(row, value_input_option="USER_ENTERED")
+        # Append only essential details for mock logging
+        order_entry = {
+            "order_id": order_id,
+            "user_id": order.get("user_id", ""),
+            "product_key": order.get("product_key", ""),
+            "status": order.get("status", "PENDING"),
+            "timestamp": order.get("timestamp", datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+        }
+        MOCK_ORDERS.append(order_entry)
+        logger.info("Logged mock order: %s", order_id)
         return True
     except Exception as e:
-        logger.error("log_order error: %s", e)
+        logger.error("log_order mock error: %s", e)
         return False
 
 
-# ------------ Keyboards ----------------
+# ------------ Keyboards (No change needed) ----------------
+# ... (Keyboards section is unchanged as it uses get_config_data which is now mocked)
 def get_payment_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -337,7 +288,7 @@ CANCEL_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 
-# ------------ Validation helpers ----------------
+# ------------ Validation helpers (No change needed) ----------------
 PHONE_RE = re.compile(r"^\d{8,15}$")
 USERNAME_RE = re.compile(r"^@?([a-zA-Z0-9_]{5,32})$")
 
@@ -359,135 +310,6 @@ def parse_amount_from_text(text: str) -> Optional[int]:
         except Exception:
             return None
     return None
-
-# ============ NEW OCR & VALIDATION HELPERS ============
-
-# Helper function to consolidate approval logic
-async def auto_approve_receipt(user_id: int, approved_amount: int, context: ContextTypes.DEFAULT_TYPE, processed_by: str = "ADMIN") -> bool:
-    """Consolidated logic for approval and balance update."""
-    
-    config = get_config_data()
-    
-    try:
-        ratio = float(config.get("mmk_to_coins_ratio", "0.5"))
-    except Exception:
-        ratio = 0.5
-    coins_to_add = int(approved_amount * ratio)
-
-    user_data = get_user_data_from_sheet(user_id)
-    try:
-        current_coins = int(user_data.get("coin_balance", "0"))
-    except ValueError:
-        current_coins = 0
-    new_balance = current_coins + coins_to_add
-
-    ok = update_user_balance(user_id, new_balance)
-    if not ok:
-        logger.error("Auto-Approval failed to update user balance: %s", user_id)
-        return False
-
-    order = {
-        "order_id": str(uuid.uuid4()),
-        "user_id": user_id,
-        "username": user_data.get("username", ""),
-        "product_key": "COIN_TOPUP",
-        "price_mmk": approved_amount,
-        "phone": "",
-        "premium_username": "",
-        "status": "APPROVED_RECEIPT",
-        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "notes": f"Receipt approved by {processed_by}.",
-        "processed_by": processed_by,
-    }
-    log_order(order)
-
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"✅ Your payment of {approved_amount} MMK has been approved. {coins_to_add} Coins added. New balance: {new_balance} Coins.",
-        )
-        return True
-    except Exception as e:
-        logger.error("Failed to notify user after approval: %s", e)
-        return True # Balance updated, notification failed
-
-
-# Placeholder function for actual OCR logic (Requires external libraries/APIs)
-async def perform_ocr_validation(photo_file_id: str, context: ContextTypes.DEFAULT_TYPE, user_data: Dict, package: Dict) -> Dict:
-    """
-    Performs OCR on the photo and checks the 5 validation layers.
-    Note: This is a placeholder/mock implementation of OCR/Tamper detection.
-    Returns: {"valid": bool, "extracted_amount": int/None, "reason": str, "tx_id": str/None}
-    """
-    global WS_ORDERS
-    
-    # 1. Image Download (In a real scenario, the file would be downloaded/streamed here)
-    # new_file = await context.bot.get_file(photo_file_id)
-    
-    # Target values from config/package
-    config = get_config_data()
-    
-    # We assume the user is buying the selected package amount
-    target_amount = package.get("mmk")
-    
-    if target_amount is None:
-        return {"valid": False, "extracted_amount": None, "reason": "Layer 2: Package price missing.", "tx_id": None}
-
-    # --- MOCK OCR RESULT ---
-    # We mock a successful result that matches the target package amount for demonstration.
-    
-    # MOCK DATA (In production, replace with actual OCR results):
-    mock_phone = config.get("kpay_phone") or "09123456789" # Use a known phone number
-    mock_tx_id = str(uuid.uuid4()) # Generate a fresh unique ID
-    # Simulating a successful extraction within the time window (e.g., 5 minutes ago)
-    mock_timestamp = datetime.datetime.utcnow() - datetime.timedelta(minutes=5)
-    
-    ocr_output = {
-        "receiver_phone": mock_phone, # Layer 1 Mock
-        "transferred_amount": target_amount, # Layer 2 Mock (Success case)
-        "transaction_id": mock_tx_id, # Layer 3 Mock
-        "timestamp": mock_timestamp, # Layer 4 Mock
-        "tamper_check_ok": True, # Layer 5 Mock: Assume basic check passes
-    }
-    
-    # --- 5-LAYER VALIDATION LOGIC ---
-    
-    # Layer 1: Receiver Phone / Name Check
-    if not ocr_output.get("receiver_phone") or ocr_output["receiver_phone"] != mock_phone:
-        return {"valid": False, "extracted_amount": target_amount, "reason": "Layer 1: Receiver phone/name mismatch.", "tx_id": mock_tx_id}
-
-    # Layer 2: Amount Check (Must match the selected package price)
-    if not ocr_output.get("transferred_amount") or ocr_output["transferred_amount"] != target_amount:
-        return {"valid": False, "extracted_amount": ocr_output.get("transferred_amount"), "reason": "Layer 2: Amount mismatch.", "tx_id": mock_tx_id}
-
-    # Layer 3: Transaction ID Uniqueness (Must check against WS_ORDERS)
-    tx_id = ocr_output.get("transaction_id")
-    if tx_id and WS_ORDERS:
-        try:
-            # Check if Tx ID already exists in the orders sheet
-            cell = WS_ORDERS.find(tx_id)
-            if cell:
-                return {"valid": False, "extracted_amount": target_amount, "reason": "Layer 3: Duplicate Transaction ID found.", "tx_id": tx_id}
-        except Exception as e:
-            logger.warning("GSheets Tx ID check failed (Layer 3 failed safety check): %s", e)
-            return {"valid": False, "extracted_amount": target_amount, "reason": f"Layer 3: Tx ID uniqueness check failed ({e}).", "tx_id": tx_id}
-            
-    # Layer 4: Time Window (e.g., must be within 2 hours of upload)
-    upload_time = datetime.datetime.utcnow()
-    receipt_time = ocr_output.get("timestamp")
-    # Check if receipt time is not too old (e.g., within 2 hours or 7200 seconds)
-    if not receipt_time or (upload_time - receipt_time).total_seconds() > (2 * 3600): 
-        return {"valid": False, "extracted_amount": target_amount, "reason": "Layer 4: Receipt time window expired (>2 hrs).", "tx_id": tx_id}
-
-    # Layer 5: Image Tamper Detection (Basic - based on OCR success/integrity checks)
-    if not ocr_output.get("tamper_check_ok"):
-        return {"valid": False, "extracted_amount": target_amount, "reason": "Layer 5: Image tamper detection failed.", "tx_id": tx_id}
-
-
-    # If all layers pass:
-    return {"valid": True, "extracted_amount": target_amount, "reason": "OCR Auto-Approved", "tx_id": tx_id}
-
-# ====================================================
 
 
 # ------------ Handlers ----------------
@@ -630,7 +452,6 @@ async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     return SELECT_COIN_PACKAGE
 
 
-# MODIFIED: Updated to include 5-Layer OCR Validation and Auto-Approval Logic
 async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_user_banned(user.id):
@@ -638,75 +459,38 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     config = get_config_data()
-    admin_contact_id = get_dynamic_admin_id(config)
+    # MODIFIED: Get Admin ID from global ADMIN_ID
+    admin_contact_id = ADMIN_ID
     
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    pkg = context.user_data.get("selected_coinpkg")
-
-    if not pkg:
-        await update.message.reply_text("❌ Payment package information missing. Please start again.")
-        return ConversationHandler.END
-
     receipt_meta = {
         "from_user_id": user.id,
         "from_username": user.username or user.full_name,
         "timestamp": timestamp,
-        "package": pkg,
+        "package": context.user_data.get("selected_coinpkg"),
     }
     context.user_data["last_receipt_meta"] = receipt_meta
 
     detected_amount = None
-    ocr_result = {"valid": False, "extracted_amount": None, "reason": "No receipt image provided"}
-    caption_note = ""
-    
     try:
         if update.message.photo:
-            # Get the largest photo file_id
-            photo_file_id = update.message.photo[-1].file_id
-            
-            # --- Perform OCR and 5-Layer Validation ---
-            user_data = get_user_data_from_sheet(user.id)
-            ocr_result = await perform_ocr_validation(
-                photo_file_id, 
-                context, 
-                user_data, 
-                pkg
-            )
-            
-            detected_amount = ocr_result.get("extracted_amount")
-            
-            # 1. Auto-Approval Logic (Only if all 5 layers pass)
-            if ocr_result["valid"] and detected_amount is not None:
-                # Perform immediate auto-approval
-                await auto_approve_receipt(user.id, detected_amount, context, f"OCR_AUTO_TX:{ocr_result.get('tx_id')}")
-                await update.message.reply_text(
-                    f"🎉 **AUTO APPROVED!**\nYour receipt passed 5-Layer Verification. {detected_amount} MMK approved.",
-                    reply_markup=MAIN_MENU_KEYBOARD, # Return to main menu keyboard
-                    parse_mode="Markdown"
-                )
-                return ConversationHandler.END
-
-            # Forward photo to admin (required even if validation failed for manual review)
+            # forward photo
             await update.message.forward(chat_id=admin_contact_id)
-            # Add OCR failure note to the caption for admin
-            caption_note = f"\n\n🚨 OCR Failed: {ocr_result['reason']}\nDetected: {detected_amount or 'N/A'}"
-            
+            detected_amount = parse_amount_from_text(update.message.caption or "")
         else:
-            # Existing logic for text/manual amount detection
             text = update.message.text or ""
             detected_amount = parse_amount_from_text(text)
             forwarded_text = f"📥 Receipt (text) from @{user.username or user.full_name} (id:{user.id})\nTime: {timestamp}\n\n{text}"
             await context.bot.send_message(chat_id=admin_contact_id, text=forwarded_text)
-            caption_note = "" # No special OCR note for text receipts
 
-        # 2. Manual Approval Setup (Only if OCR failed or text receipt)
-        
         # Build approve buttons with amounts from config or defaults
         amounts_cfg = config.get("receipt_approve_amounts", "")
         if amounts_cfg:
             try:
+                # ဤနေရာတွင် စာလုံးမှားယွင်းပါက ValueError တက်ပါသည်။
                 choices = [int(x.strip()) for x in amounts_cfg.split(",") if x.strip().isdigit()]
             except Exception:
+                # Configuration မှားယွင်းပါက Default သို့ ပြန်သွားပါမည်။
                 choices = [2000, 4000, 10000, 20000]
 
         else:
@@ -726,23 +510,22 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb_rows.append(row)
         kb_rows.append([InlineKeyboardButton("❌ Deny", callback_data=f"admin_deny_receipt|{user.id}|{timestamp}")])
 
-        # Send manual review prompt to Admin (includes OCR failure note if applicable)
         await context.bot.send_message(
             chat_id=admin_contact_id,
-            text=f"📥 Receipt from @{user.username or user.full_name} (id:{user.id}) Time: {timestamp} {caption_note}",
+            text=f"📥 Receipt from @{user.username or user.full_name} (id:{user.id}) Time: {timestamp}",
             reply_markup=InlineKeyboardMarkup(kb_rows),
         )
-
     except Exception as e:
-        logger.error("Failed to process receipt or send buttons to admin: %s", e)
-        await update.message.reply_text("❌ Could not process receipt or forward to admin. Please try again later. Please check your ADMIN_ID and Bot permissions.")
+        # Error တက်ပါက Bot မှ Admin သို့ Approval Button များပို့ရန် မအောင်မြင်ပါ။
+        logger.error("Failed to send receipt buttons to admin: %s", e)
+        await update.message.reply_text("❌ Could not forward receipt to admin. Please try again later. Please check your ADMIN_ID and Bot permissions.")
         return ConversationHandler.END
 
     await update.message.reply_text("💌 Receipt sent to Admin. You will be notified after approval.")
     return ConversationHandler.END
 
 
-# MODIFIED: Updated to use the consolidated auto_approve_receipt function
+# Admin callbacks for receipts (unchanged)
 async def admin_approve_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -760,25 +543,57 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         await query.message.reply_text("Invalid parameters.")
         return
 
-    config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data for authorization check
-    admin_id_check = get_dynamic_admin_id(config)
+    # MODIFIED: Get ADMIN_ID from global variable for authorization check
+    admin_id_check = ADMIN_ID
     
     if query.from_user.id != admin_id_check:
         await query.message.reply_text("You are not authorized to perform this action.")
         return
 
-    # Use the consolidated approval function
-    ok = await auto_approve_receipt(user_id, approved_amount, context, str(query.from_user.id))
-    
-    if ok:
-        await query.message.reply_text("✅ Approved and user balance updated.")
-        try:
-             await query.message.edit_reply_markup(reply_markup=None) # Remove buttons after action
-        except Exception:
-             pass
-    else:
+    config = get_config_data()
+    # ratio: mmk -> coins (user requested: 1 MMK = 0.5 coin)
+    try:
+        ratio = float(config.get("mmk_to_coins_ratio", "0.5"))
+    except Exception:
+        ratio = 0.5
+    coins_to_add = int(approved_amount * ratio)
+
+    user_data = get_user_data_from_sheet(user_id)
+    try:
+        current_coins = int(user_data.get("coin_balance", "0"))
+    except ValueError:
+        current_coins = 0
+    new_balance = current_coins + coins_to_add
+
+    ok = update_user_balance(user_id, new_balance)
+    if not ok:
         await query.message.reply_text("Failed to update user balance in sheet.")
+        return
+
+    order = {
+        "order_id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "username": user_data.get("username", ""),
+        "product_key": "COIN_TOPUP",
+        "price_mmk": approved_amount,
+        "phone": "",
+        "premium_username": "",
+        "status": "APPROVED_RECEIPT",
+        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "notes": f"Receipt approved by admin {query.from_user.id} at {ts}",
+        "processed_by": str(query.from_user.id),
+    }
+    log_order(order)
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"✅ Your payment of {approved_amount} MMK has been approved by admin. {coins_to_add} Coins added. New balance: {new_balance} Coins.",
+        )
+        await query.message.reply_text("✅ Approved and user balance updated.")
+    except Exception as e:
+        logger.error("Failed to notify user after approval: %s", e)
+        await query.message.reply_text("Approved but failed to notify user.")
 
 
 async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -796,9 +611,8 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         await query.message.reply_text("Invalid user id.")
         return
 
-    config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data for authorization check
-    admin_id_check = get_dynamic_admin_id(config)
+    # MODIFIED: Get ADMIN_ID from global variable for authorization check
+    admin_id_check = ADMIN_ID
 
     if query.from_user.id != admin_id_check:
         await query.message.reply_text("You are not authorized to perform this action.")
@@ -994,9 +808,8 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     }
     log_order(order)
     
-    config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data
-    admin_id_check = get_dynamic_admin_id(config)
+    # MODIFIED: Get ADMIN_ID from global variable
+    admin_id_check = ADMIN_ID
 
 
     await update.message.reply_text(
@@ -1054,8 +867,8 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # Admin commands (ban/unban) - Updated to use config ID
 async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
+    # MODIFIED: Check against global ADMIN_ID
+    admin_id_check = ADMIN_ID
     
     user = update.effective_user
     if user.id != admin_id_check:
@@ -1078,8 +891,8 @@ async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
+    # MODIFIED: Check against global ADMIN_ID
+    admin_id_check = ADMIN_ID
     
     user = update.effective_user
     if user.id != admin_id_check:
@@ -1107,8 +920,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     err_msg = str(context.error)[:1000] if context.error else "No details"
     logger.error("Exception while handling an update: %s: %s", err_type, err_msg)
     
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
+    # MODIFIED: Send error to global ADMIN_ID
+    admin_id_check = ADMIN_ID
 
     try:
         await context.bot.send_message(
@@ -1121,14 +934,18 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # --------------- Main ---------------
 def main():
-    ok = initialize_sheets()
-    if not ok:
-        logger.error("Bot cannot start due to Google Sheets initialization failure.")
-        return
+    # MODIFIED: initialize_sheets() ကို ဖယ်ရှားသည်။
+    # ok = initialize_sheets()
+    # if not ok:
+    #     logger.error("Bot cannot start due to Google Sheets initialization failure.")
+    #     return
 
     if not BOT_TOKEN:
         logger.error("Missing BOT_TOKEN environment variable.")
         return
+    
+    # **သတိပြုရန်**: Sheet ကို မသုံးတော့သောကြောင့် user data (coin balance, registration) နှင့် order log များသည်
+    # Bot restart လုပ်တိုင်း ပျောက်ဆုံးသွားပါမည်။ ၎င်းကို Mocking Functions များဖြင့် အစားထိုးထားပါသည်။
 
     application = Application.builder().token(BOT_TOKEN).build()
 
