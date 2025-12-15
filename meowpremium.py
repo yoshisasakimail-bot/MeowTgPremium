@@ -1510,7 +1510,7 @@ async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     return ConversationHandler.END
 
-# MODIFIED: Logic to handle all media types (Photo, Video, GIF, Sticker, Text)
+# MODIFIED: Logic to handle all media types (Photo, Video, GIF, Sticker, Text) - FIX EDIT_TEXT ERROR
 async def confirm_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     message = update.effective_message
     
@@ -1551,7 +1551,6 @@ async def confirm_broadcast_content(update: Update, context: ContextTypes.DEFAUL
         'text': stored_text,
         'file_id': file_id,
         'has_media': media_type != 'text',
-        # Store original update message for forwarding, if needed (complex case)
         'forward_message_id': message.message_id 
     }
 
@@ -1581,7 +1580,7 @@ async def confirm_broadcast_content(update: Update, context: ContextTypes.DEFAUL
     
     # 3. Send confirmation back to Admin
     
-    # If it's a media type that supports caption (Photo, Video, GIF), send the media with the confirmation text as caption.
+    # FIX: Send media and confirmation message separately to avoid "Bad Request: There is no text in the message to edit"
     if media_type in ['photo', 'video', 'animation']:
         send_method = {
             'photo': context.bot.send_photo,
@@ -1589,13 +1588,21 @@ async def confirm_broadcast_content(update: Update, context: ContextTypes.DEFAUL
             'animation': context.bot.send_animation
         }.get(media_type)
         
+        # Send the media first (optional caption)
         await send_method(
             chat_id=update.effective_chat.id,
-            photo=file_id, # This works for photo, video, and animation (as input_file_id)
-            caption=confirm_text,
-            parse_mode="HTML",
-            reply_markup=keyboard
+            photo=file_id, 
+            caption="**[Preview]** Your broadcast media is above.",
+            parse_mode="Markdown",
         )
+        
+        # Send the confirmation text and Inline Keyboard as a SEPARATE message
+        await update.message.reply_text(
+            f"⬆️ Message Previewed above. Do you want to proceed with the broadcast?\n\n{confirm_text}",
+            reply_markup=keyboard, 
+            parse_mode="HTML"
+        )
+        
     elif media_type == 'sticker':
         # Stickers do not support captions. Send the sticker, then follow up with the confirmation text.
         await context.bot.send_sticker(
@@ -1603,9 +1610,9 @@ async def confirm_broadcast_content(update: Update, context: ContextTypes.DEFAUL
             sticker=file_id
         )
         await update.message.reply_text(
-            f"{confirm_text}\n\n*Sticker sent above. Confirm broadcast?*",
-            parse_mode="Markdown",
-            reply_markup=keyboard
+            f"*(Sticker sent above.)* \n\n{confirm_text}",
+            parse_mode="HTML",
+            reply_markup=keyboard 
         )
     else:
         # Pure text message
@@ -1614,7 +1621,7 @@ async def confirm_broadcast_content(update: Update, context: ContextTypes.DEFAUL
     # Remove the temporary keyboard for confirmation step
     await context.bot.send_message(
         chat_id=update.effective_chat.id,
-        text="Please confirm the broadcast.", 
+        text="Awaiting final confirmation...", # Changed text slightly
         reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
     )
 
@@ -1640,22 +1647,23 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     sent_count = 0
     failed_count = 0
     
-    await query.message.edit_text("🚀 Starting broadcast... This may take a moment.", reply_markup=None)
+    # Note: Edit the final confirmation message (the one with the inline keyboard)
+    await query.message.edit_text("🚀 Starting broadcast... This may take a moment. Please wait for the final report.", reply_markup=None)
     
     # Extract data for sending
     media_type = message_data['type']
     file_id = message_data['file_id']
-    text = message_data['text'] if not message_data['text'].startswith('*(') else None # Use None if it's the placeholder text
-    has_media = message_data['has_media']
-
+    # If the text is the placeholder, treat it as None/empty for caption purposes
+    text_for_sending = message_data['text'] if not message_data['text'].startswith('*(') else None 
+    
     for user_id in all_user_ids:
         try:
             if media_type == 'photo':
-                await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=text, parse_mode="HTML")
+                await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=text_for_sending, parse_mode="HTML")
             elif media_type == 'video':
-                await context.bot.send_video(chat_id=user_id, video=file_id, caption=text, parse_mode="HTML")
+                await context.bot.send_video(chat_id=user_id, video=file_id, caption=text_for_sending, parse_mode="HTML")
             elif media_type == 'animation':
-                await context.bot.send_animation(chat_id=user_id, animation=file_id, caption=text, parse_mode="HTML")
+                await context.bot.send_animation(chat_id=user_id, animation=file_id, caption=text_for_sending, parse_mode="HTML")
             elif media_type == 'sticker':
                 # Stickers do not support text/caption
                 await context.bot.send_sticker(chat_id=user_id, sticker=file_id)
@@ -1725,13 +1733,13 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("cancel", cancel_product_order)) # NEW: Handle /cancel command
 
-    # Admin commands (legacy /ban /unban) - REMOVED AS REQUESTED TO FIX NAMEERROR
+    # Admin commands (legacy /ban /unban) - REMOVED TO FIX NAMEERROR
     # application.add_handler(CommandHandler("ban", admin_ban_user))
     # application.add_handler(CommandHandler("unban", admin_unban_user))
     
     # Admin Inline Callback Handlers
     application.add_handler(CallbackQueryHandler(set_bot_status_callback, pattern=r"^set_status_"))
-    application.add_handler(CallbackQueryHandler(toggle_ban_callback, pattern=r"^toggleban\|"))
+    application.add_handler(CallbackQueryHandler(toggle_ban_callback, pattern=r"^toggleban|"))
 
 
     # NEW: Admin Reply Keyboard Handlers
