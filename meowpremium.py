@@ -856,27 +856,28 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
 async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data # rpd|<user_id>|<short_ts>
+    data = query.data # rpd|<user...
+
     parts = data.split("|")
     if len(parts) < 3:
         await query.message.reply_text("Invalid admin action.")
         return
-    
+
     # short_ts_str now contains the Unix timestamp (string format)
-    _, user_id_str, short_ts_str = parts
+    _, user_id_str, short_ts_str = parts[0], parts[1], parts[2]
     try:
         user_id = int(user_id_str)
         # Convert short_ts back to human-readable format for logging
         unix_to_dt = datetime.datetime.fromtimestamp(int(short_ts_str))
         ts_human_readable = unix_to_dt.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
-        await query.message.reply_text("Invalid user id or timestamp.")
+        await query.message.reply_text("Invalid parameters.")
         return
 
     config = get_config_data()
     # MODIFIED: Get ADMIN_ID from config data for authorization check
     admin_id_check = get_dynamic_admin_id(config)
-
+    
     if query.from_user.id != admin_id_check:
         await query.message.reply_text("You are not authorized to perform this action.")
         return
@@ -895,7 +896,7 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         "processed_by": str(query.from_user.id),
     }
     log_order(order)
-
+    
     try:
         await context.bot.send_message(
             chat_id=user_id,
@@ -911,7 +912,6 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
 async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     user = query.from_user
     config = get_config_data()
     admin_id_check = get_dynamic_admin_id(config)
@@ -919,14 +919,20 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     if not BOT_STATUS_ON and user.id != admin_id_check:
         await query.message.reply_text("⛔ Bot is in maintenance mode. Cannot process orders now.", parse_mode="Markdown")
         return ConversationHandler.END
-        
+
     parts = query.data.split("_")
     if len(parts) < 2:
         await query.message.reply_text("Invalid product selection.")
         return ConversationHandler.END
+
     product_type = parts[1]
     context.user_data["product_type"] = product_type
     keyboard = get_product_keyboard(product_type)
+    
+    if is_user_banned(user.id):
+        await query.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
+        return ConversationHandler.END
+
     try:
         # Edit the message with the service menu to show product selection
         await query.message.edit_text(
@@ -934,64 +940,96 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=keyboard,
             parse_mode="Markdown",
         )
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error editing message for product selection: {e}")
+        # Fallback to sending a new message if editing fails (e.g., message too old)
         await query.message.reply_text(
             f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
             reply_markup=keyboard,
             parse_mode="Markdown",
         )
-    return SELECT_PRODUCT_PRICE
+    
+    # No state change here, just updating the keyboard/options in the same message.
+    return ConversationHandler.END
 
 
-async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_product_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    selected_key = query.data
-    context.user_data["product_key"] = selected_key
+    product_key = query.data
+    context.user_data["product_key"] = product_key
     
-    # NEW: Send the initial message without the keyboard, then send the keyboard as a new message
+    config = get_config_data()
+    price_mmk_str = config.get(product_key)
+    
+    if price_mmk_str is None:
+        await query.message.reply_text("❌ Price for this product not found in config. Please select again.")
+        return SELECT_PRODUCT_PRICE # Stay in the selection state
+
     try:
-        await query.message.edit_text(
-            f"You selected *{selected_key.replace('_',' ').upper()}*.\n"
-            "Please send the **Telegram Phone Number** for the service (digits only).",
-            parse_mode="Markdown",
-        )
-    except Exception:
+        price_mmk = int(price_mmk_str)
+    except ValueError:
+        await query.message.reply_text("❌ Invalid price configured for this product. Please try another or contact support.")
+        return SELECT_PRODUCT_PRICE # Stay in the selection state
+
+    # --- Calculate Coin Price needed ---
+    product_type = context.user_data.get("product_type", "star")
+    coin_rate_key = f"coin_rate_{product_type}"
+    try:
+        coin_rate_mmk = float(config.get(coin_rate_key, "1000")) 
+    except ValueError:
+        coin_rate_mmk = 1000.0
+
+    if coin_rate_mmk <= 0:
+         coin_rate_mmk = 1000.0
+         
+    price_needed_coins = max(1, int(price_mmk / coin_rate_mmk))
+    context.user_data["price_needed_coins"] = price_needed_coins
+
+    # Check user balance
+    user_data = get_user_data_from_sheet(query.from_user.id)
+    current_coins = int(user_data.get("coin_balance", "0"))
+
+    if current_coins < price_needed_coins:
+        missing_coins = price_needed_coins - current_coins
         await query.message.reply_text(
-            f"You selected *{selected_key.replace('_',' ').upper()}*.\n"
-            "Please send the **Telegram Phone Number** for the service (digits only).",
-            parse_mode="Markdown",
+            f"❌ **Insufficient Coins.** You need **{price_needed_coins:,} Coins** to buy this product, but you only have **{current_coins:,} Coins**.\n\n"
+            f"You are short **{missing_coins:,} Coins**. Please buy more coins first.",
+            reply_markup=get_coin_package_keyboard(), # Redirect to coin purchase
+            parse_mode="Markdown"
         )
-        
-    # NEW: Send the cancel keyboard to the user
-    await context.bot.send_message(
-        chat_id=query.from_user.id,
-        text="If you want to stop the order, click '❌ Cancel Order'.",
-        reply_markup=CANCEL_KEYBOARD
+        return ConversationHandler.END # End the product purchase conv.
+
+    # Proceed to phone number prompt
+    await query.message.reply_text(
+        f"✅ Product Selected: **{product_key.replace('_',' ').upper()}** ({price_needed_coins:,} Coins).\n\n"
+        "♦️Please send the **Phone Number** associated with the Telegram account (Digits only, 8-15 digits).",
+        reply_markup=CANCEL_KEYBOARD,
+        parse_mode="Markdown"
     )
     return WAITING_FOR_PHONE
 
 
-async def validate_phone_and_ask_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
-    if PHONE_RE.match(text):
-        context.user_data["premium_phone"] = text
+async def get_premium_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if is_user_banned(user.id):
+        await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+        
+    phone_number = update.message.text.strip()
+    
+    if PHONE_RE.match(phone_number):
+        context.user_data["premium_phone"] = phone_number
         await update.message.reply_text(
-            f"Thank you. Now please send the **Telegram Username** associated with {text} (start with @ or plain username)."
-        )
-        # NEW: Send the cancel keyboard again
-        await context.bot.send_message(
-            chat_id=update.effective_user.id,
-            text="If you want to stop the order, click '❌ Cancel Order'.",
-            reply_markup=CANCEL_KEYBOARD
+            "♦️Phone Number received. Now, please send the **Telegram Username** (starts with @, e.g., @your_username) for the account you want the service on.",
+            reply_markup=CANCEL_KEYBOARD # Keep the cancel keyboard again
         )
         return WAITING_FOR_USERNAME
     else:
         await update.message.reply_text("❌ Invalid phone. Send digits only (8-15 digits).")
         # Keep the cancel keyboard visible
-        await context.bot.send_message(
-            chat_id=update.effective_user.id,
-            text="If you want to stop the order, click '❌ Cancel Order'.",
+        await update.message.reply_text(
+            "If you want to stop the order, click '❌ Cancel Order'.",
             reply_markup=CANCEL_KEYBOARD
         )
         return WAITING_FOR_PHONE
@@ -1000,11 +1038,10 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
 async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
-
     if is_user_banned(user_id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
-
+        
     product_key = context.user_data.get("product_key")
     premium_phone = context.user_data.get("premium_phone", "")
     raw_username = (update.message.text or "").strip()
@@ -1013,9 +1050,8 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     if not premium_username:
         await update.message.reply_text("❌ Invalid username format. Please try again.")
         # Keep the cancel keyboard visible
-        await context.bot.send_message(
-            chat_id=update.effective_user.id,
-            text="If you want to stop the order, click '❌ Cancel Order'.",
+        await update.message.reply_text(
+            "If you want to stop the order, click '❌ Cancel Order'.",
             reply_markup=CANCEL_KEYBOARD
         )
         return WAITING_FOR_USERNAME
@@ -1029,70 +1065,58 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     if price_mmk_str is None:
         await update.message.reply_text("❌ Price for this product not found in config.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
-
+    
     try:
         price_mmk_needed = int(price_mmk_str)
     except ValueError:
         await update.message.reply_text("❌ Product MMK price in config is invalid.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
-
+    
     # --- Calculate Coin Price needed ---
-    product_type = product_key.split('_')[0]
-    coin_rate_key = f"coin_rate_{product_type}"
-    try:
-        coin_rate_mmk = float(config.get(coin_rate_key, "1000")) 
-    except ValueError:
-        coin_rate_mmk = 1000.0
+    price_needed_coins = context.user_data.get("price_needed_coins")
+    
+    if price_needed_coins is None:
+        # Fallback calculation if context somehow lost the price (should not happen)
+        product_type = product_key.split('_')[0]
+        coin_rate_key = f"coin_rate_{product_type}"
+        try:
+            coin_rate_mmk = float(config.get(coin_rate_key, "1000")) 
+        except ValueError:
+            coin_rate_mmk = 1000.0
 
-    if coin_rate_mmk <= 0:
-         coin_rate_mmk = 1000.0
-         
-    price_needed_coins = int(price_mmk_needed / coin_rate_mmk) 
-    price_needed_coins = max(1, price_needed_coins) # Ensure at least 1 coin
-
-    # --- Check Balance ---
+        if coin_rate_mmk <= 0:
+            coin_rate_mmk = 1000.0
+            
+        price_needed_coins = max(1, int(price_mmk_needed / coin_rate_mmk))
+        
+    # Check balance again (final check before deduction)
     user_data = get_user_data_from_sheet(user_id)
-    try:
-        user_coins = int(user_data.get("coin_balance", "0"))
-    except ValueError:
-        user_coins = 0
-
-    if user_coins < price_needed_coins:
-        await update.message.reply_text(
-            f"❌ Insufficient coin balance. You need {price_needed_coins:,.0f} Coins but have {user_coins:,.0f} Coins. Use '💰 Payment Method' to top up.",
-            reply_markup=MAIN_MENU_KEYBOARD
-        )
-        order = {
-            "order_id": str(uuid.uuid4()),
-            "user_id": user_id,
-            "username": user_data.get("username", ""),
-            "product_key": product_key,
-            "price_mmk": price_mmk_needed,
-            "phone": premium_phone,
-            "premium_username": premium_username,
-            "status": "FAILED_INSUFFICIENT_FUNDS",
-            "notes": "User attempted purchase without sufficient coins.",
-        }
-        log_order(order)
+    current_coins = int(user_data.get("coin_balance", "0"))
+    
+    if current_coins < price_needed_coins:
+        # Should have been caught earlier, but safety check.
+        await update.message.reply_text("❌ Final balance check failed. Please restart your order.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
-    # --- Deduct Coin ---
-    new_balance = user_coins - price_needed_coins
+    # --- Deduct Coins and Log Order ---
+    new_balance = current_coins - price_needed_coins
+    
     ok = update_user_balance(user_id, new_balance)
+    
     if not ok:
-        await update.message.reply_text("❌ Failed to deduct coins. Please contact admin.", reply_markup=MAIN_MENU_KEYBOARD)
+        await update.message.reply_text("❌ Failed to deduct coins. Please contact support.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
-    # --- Log Order ---
     order = {
         "order_id": str(uuid.uuid4()),
         "user_id": user_id,
-        "username": user_data.get("username", ""),
+        "username": user.username or user.full_name,
         "product_key": product_key,
-        "price_mmk": price_mmk_needed, # Log the MMK price for consistency
+        "price_mmk": price_mmk_needed,
         "phone": premium_phone,
         "premium_username": premium_username,
         "status": "ORDER_PLACED",
+        "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "notes": f"Order placed and {price_needed_coins:,.0f} Coins deducted.",
     }
     log_order(order)
@@ -1101,12 +1125,12 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     # MODIFIED: Get ADMIN_ID from config data
     admin_id_check = get_dynamic_admin_id(config)
 
-
     await update.message.reply_text(
         f"✅ Order successful! **{price_needed_coins:,.0f} Coins** have been deducted for {product_key.replace('_',' ').upper()}.\n"
         f"New balance: {new_balance:,.0f} Coins. Please wait while service is processed.",
         reply_markup=MAIN_MENU_KEYBOARD # Show main menu keyboard on success
     )
+    
     try:
         admin_msg = (
             f"🛒 New Order\n"
@@ -1120,8 +1144,9 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         await context.bot.send_message(chat_id=admin_id_check, text=admin_msg)
     except Exception as e:
         logger.error("Failed to notify admin about order: %s", e)
-
+        
     return ConversationHandler.END
+
 
 # NEW: Handler to cancel the product purchase conversation
 async def cancel_product_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1136,34 +1161,21 @@ async def cancel_product_order(update: Update, context: ContextTypes.DEFAULT_TYP
 async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
     user = query.from_user
     config = get_config_data()
     admin_id_check = get_dynamic_admin_id(config)
-    
     # Check if the user is the Admin from the config sheet
     is_admin = (user.id == admin_id_check)
     keyboard_to_use = ADMIN_REPLY_KEYBOARD if is_admin else MAIN_MENU_KEYBOARD
 
-    welcome_text = "Welcome back to the main menu. Choose from the options below."
-
-    # Use reply_text which sends a new message with the Reply Keyboard.
+    await query.message.reply_text("Returning to main menu.", reply_markup=keyboard_to_use)
+    # Delete the message that contained the inline keyboard to clean up the chat
     try:
-        # Delete the previous inline message if possible
         await query.message.delete()
     except Exception:
-        pass # Ignore error if delete fails (e.g., message is too old)
+        pass # Ignore if deletion fails
 
-    await context.bot.send_message(
-        chat_id=query.from_user.id,
-        text=welcome_text,
-        reply_markup=keyboard_to_use, # Use the determined keyboard
-    )
-    return ConversationHandler.END # Exit any active conversation state
-
-# --------------- Admin Features (NEWLY IMPLEMENTED OR MODIFIED) ---------------
-
-# Admin authorization check helper
+# Admin check helper
 def is_admin(user_id: int) -> bool:
     config = get_config_data()
     admin_id_check = get_dynamic_admin_id(config)
@@ -1171,26 +1183,26 @@ def is_admin(user_id: int) -> bool:
 
 # ----------------- ⚙️ Close to Selling (Bot Status Control) -----------------
 async def handle_close_to_selling(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.id):
+    if not is_admin(update.effective_user.id):
         await update.message.reply_text("You are not authorized.")
         return
-        
-    global BOT_STATUS_ON
-    status_text = "🟢 ACTIVE" if BOT_STATUS_ON else "⛔ MAINTENANCE MODE"
+
+    status_text = "ON (Active) ✅" if BOT_STATUS_ON else "OFF (Maintenance) ⛔"
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Set to ACTIVE", callback_data="set_status_on")],
-        [InlineKeyboardButton("⛔ Set to MAINTENANCE", callback_data="set_status_off")]
+        [
+            InlineKeyboardButton("✅ Set Status ON", callback_data="set_status_on"),
+            InlineKeyboardButton("⛔ Set Status OFF", callback_data="set_status_off")
+        ]
     ])
-    
+
     await update.message.reply_text(
-        f"⚙️ **Bot Status Control**\n\n"
-        f"Current Status: **{status_text}**\n\n"
-        "Select the new status for the bot. Users will be blocked from ordering/topping up if set to Maintenance.",
+        f"⚙️ **BOT STATUS CONTROL**\n\nCurrent Status: **{status_text}**\n\n"
+        "Users will be blocked from ordering/topping up if set to Maintenance.",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
+
 
 async def set_bot_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1199,10 +1211,10 @@ async def set_bot_status_callback(update: Update, context: ContextTypes.DEFAULT_
     if not is_admin(query.from_user.id):
         await query.message.reply_text("You are not authorized.")
         return
-        
+
     global BOT_STATUS_ON
     new_status = query.data.split("_")[-1]
-
+    
     if new_status == 'on':
         BOT_STATUS_ON = True
         msg = "✅ Bot is now **ACTIVE (ON)**. Users can place orders."
@@ -1222,13 +1234,13 @@ async def handle_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("You are not authorized.")
         return
-        
+
     # --- Placeholder Data Generation ---
     try:
         total_users = len(get_all_user_ids())
     except Exception:
         total_users = "N/A"
-        
+
     stats_msg = (
         f"📊 **Bot Statistics Overview**\n\n"
         f"👤 Total Registered Users: **{total_users:,}**\n"
@@ -1236,7 +1248,6 @@ async def handle_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💵 Total Revenue (Placeholder): **{500_000:,}** MMK\n\n"
         f"*(Note: Order and Revenue stats require further sheet processing logic)*"
     )
-    
     await update.message.reply_text(stats_msg, parse_mode="Markdown")
 
 
@@ -1245,58 +1256,54 @@ async def handle_refresh_config(update: Update, context: ContextTypes.DEFAULT_TY
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("You are not authorized.")
         return
-        
+
+    # Force refresh the config cache
     get_config_data(force_refresh=True)
-    await update.message.reply_text("🔄 Config data refreshed from Google Sheet.")
+    await update.message.reply_text("✅ Config data cache refreshed from Google Sheet.", reply_markup=ADMIN_REPLY_KEYBOARD)
 
 
-# ----------------- 📝 Cash Control (Modified) -----------------
-
-# Function to start the Cash Control process
+# ----------------- 📝 Cash Control (New Conversation Handler) -----------------
 async def start_cash_control(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    if not is_admin(user.id):
-        await update.message.reply_text("You are not authorized to use Cash Control.", reply_markup=ADMIN_REPLY_KEYBOARD)
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("You are not authorized.")
         return ConversationHandler.END
 
-    # Ask Admin for User ID or Username
     await update.message.reply_text(
-        "📝 **CASH CONTROL**\n\n"
-        "Please enter the **User ID (number)** or **Username (@...)** of the user whose balance you want to modify.",
+        "📝 **CASH CONTROL (Coin Balance)**\n\n"
+        "Please enter the **User ID (number)** or **Username (@...)** of the user.",
         parse_mode="Markdown",
-        reply_markup=ADMIN_CANCEL_KEYBOARD # Use generic cancel keyboard
+        reply_markup=ADMIN_CANCEL_KEYBOARD
     )
-    
     return AWAIT_CASH_CONTROL_ID
 
-# Function to handle cancellation
+
 async def cash_control_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop('target_cash_control_id', None)
+    context.user_data.pop('target_cash_control_name', None)
     await update.message.reply_text(
         "📝 Cash Control cancelled.",
         reply_markup=ADMIN_REPLY_KEYBOARD
     )
     return ConversationHandler.END
 
-# Function to get User ID/Username and ask for amount (FIXED SEARCH LOGIC + NEW MESSAGE FORMAT)
+
 async def cash_control_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     input_identifier = update.message.text.strip()
-    
-    # Use the improved resolve_user_id helper
     user_id_int = resolve_user_id(input_identifier)
 
     if not user_id_int:
         await update.message.reply_text("❌ User not found or ID/Username is invalid. Please try again or type '⬅️ Cancel'.")
         return AWAIT_CASH_CONTROL_ID
-         
+
     # Get user data for balance display
     user_data = get_user_data_from_sheet(user_id_int)
     target_username = user_data.get("username", f"ID:{user_id_int}")
     current_coin_balance = int(user_data.get("coin_balance", "0"))
-         
+
     # Store the target ID and Username in context
     context.user_data['target_cash_control_id'] = user_id_int
     context.user_data['target_cash_control_name'] = target_username
-    
+
     # 2. Ask for Coin amount with NEW FORMAT
     new_message = (
         f"📝 **Target User Found**: {target_username} (ID `{user_id_int}`)\n\n"
@@ -1305,13 +1312,12 @@ async def cash_control_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"🌀Use **+** for adding (e.g., `+5000`)\n"
         f"🌀Use **-** for subtracting (e.g., `-100`)\n"
     )
-    
+
     await update.message.reply_text(
         new_message,
         parse_mode="Markdown",
         reply_markup=ADMIN_CANCEL_KEYBOARD
     )
-    
     return AWAIT_CASH_CONTROL_AMOUNT
 
 # Function to apply the coin change and finish
@@ -1320,7 +1326,7 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
     target_user_id = context.user_data.get('target_cash_control_id')
     target_user_name = context.user_data.get('target_cash_control_name', f"ID:{target_user_id}")
     admin_user = update.effective_user
-    
+
     if not target_user_id:
         await update.message.reply_text("❌ Error: Target user ID lost. Please restart Cash Control.", reply_markup=ADMIN_REPLY_KEYBOARD)
         return ConversationHandler.END
@@ -1330,87 +1336,84 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
     if not match:
         await update.message.reply_text("❌ Invalid format. Please use '+[number]' or '-[number]' (e.g., `+5000` or `-100`).")
         return AWAIT_CASH_CONTROL_AMOUNT
-
+    
     try:
         coin_change = int(match.group(1))
     except ValueError:
-        await update.message.reply_text("❌ The number provided is too large or not a valid integer.")
+        await update.message.reply_text("❌ Invalid number provided. Please try again.")
         return AWAIT_CASH_CONTROL_AMOUNT
 
-    # 2. Update Coin Balance in the sheet
-    ws_user = get_user_data_sheet()
-    user_row = find_user_row(target_user_id)
-    
-    if user_row:
-        balance_cell_col = 3 # coin_balance is Column C
-        # Ensure we read the current balance correctly (clean up the string)
-        try:
-             old_balance = int(ws_user.cell(user_row, balance_cell_col).value or 0)
-        except ValueError:
-             old_balance = 0
-             
-        new_balance = old_balance + coin_change
-        
-        # Update the sheet
-        ws_user.update_cell(user_row, balance_cell_col, new_balance)
-        
-        # 3. Create success message for Admin
-        if coin_change > 0:
-            action_text = "Added"
-            action_emoji = "🟢"
-        elif coin_change < 0:
-            action_text = "Subtracted"
-            action_emoji = "🔴"
-        else:
-            action_text = "No Change"
-            action_emoji = "⚪"
+    # 2. Get current balance and calculate new balance (Crucial: re-read balance from sheet for atomic-like operation)
+    user_data = get_user_data_from_sheet(target_user_id)
+    try:
+        current_coins = int(user_data.get("coin_balance", "0"))
+    except ValueError:
+        current_coins = 0
 
-        admin_processed_by = f"@{admin_user.username}" if admin_user.username else f"ID:{admin_user.id}"
-        
-        admin_success_msg = (
-            f"✅ **Cash Control Successful!**\n\n"
-            f"{action_emoji} **Action:** {action_text} **{abs(coin_change):,} Coins**\n"
-            f"**User:** {target_user_name} (ID `{target_user_id}`)\n"
-            f"**Old Balance:** {old_balance:,} Coins\n"
-            f"**New Balance:** {new_balance:,} Coins\n"
-            f"**Processed by:** {admin_processed_by}"
+    new_balance = current_coins + coin_change
+
+    # Prevent negative balance if coin_change is subtraction (optional, but good practice)
+    if new_balance < 0 and coin_change < 0:
+        await update.message.reply_text(
+            f"❌ Cannot subtract **{-coin_change:,} Coins**. User **{target_user_name}** only has **{current_coins:,} Coins**.", 
+            parse_mode="Markdown"
         )
-        
-        await update.message.reply_text(admin_success_msg, parse_mode="Markdown", reply_markup=ADMIN_REPLY_KEYBOARD)
+        return AWAIT_CASH_CONTROL_AMOUNT # Ask for amount again
 
-        # 4. Notify User (Only if coins were added, as requested)
-        if coin_change > 0:
-            user_notification = (
-                f"🎉 **Coin Update Notification**\n\n"
-                f"**{coin_change:,} Coins** have been manually added to your account by the Admin.\n\n"
-                f"Your new balance is **{new_balance:,} Coins**."
+    # 3. Apply the change
+    ok = update_user_balance(target_user_id, new_balance)
+
+    if ok:
+        change_type = "Added" if coin_change >= 0 else "Subtracted"
+        log_order({
+            "order_id": str(uuid.uuid4()),
+            "user_id": target_user_id,
+            "username": target_user_name,
+            "product_key": "ADMIN_CASH_CONTROL",
+            "price_mmk": 0,
+            "phone": "",
+            "premium_username": "",
+            "status": f"BALANCE_ADJUSTED ({change_type})",
+            "notes": f"{change_type} {abs(coin_change):,} Coins. Old: {current_coins}. New: {new_balance}.",
+            "processed_by": str(admin_user.id),
+        })
+
+        admin_notification = (
+            f"✅ **Cash Control Successful**\n\n"
+            f"👤 Target: **{target_user_name}** (ID `{target_user_id}`)\n"
+            f"💰 Change: **{coin_change:+,} Coins**\n"
+            f"✨ New Balance: **{new_balance:,} Coins**"
+        )
+        await update.message.reply_text(admin_notification, parse_mode="Markdown", reply_markup=ADMIN_REPLY_KEYBOARD)
+
+        # Notify user (if not banned)
+        user_notification = (
+            f"🔔 Your Coin Balance was adjusted by an Admin: **{coin_change:+,} Coins**.\n"
+            f"Your new balance is **{new_balance:,} Coins**."
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=user_notification,
+                parse_mode="Markdown"
             )
-            try:
-                await context.bot.send_message(
-                    chat_id=target_user_id,
-                    text=user_notification,
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                await update.message.reply_text(f"⚠️ Warning: Could not send notification to user ID {target_user_id}. Error: {e}", reply_markup=ADMIN_REPLY_KEYBOARD)
-
+        except Exception as e:
+            await update.message.reply_text(f"⚠️ Warning: Could not send notification to user ID {target_user_id}. Error: {e}", reply_markup=ADMIN_REPLY_KEYBOARD)
     else:
         await update.message.reply_text("❌ Error: Target user row could not be located in the sheet during final update.", reply_markup=ADMIN_REPLY_KEYBOARD)
 
     # Clean up context data
     context.user_data.pop('target_cash_control_id', None)
     context.user_data.pop('target_cash_control_name', None)
-        
     return ConversationHandler.END
 
 
 # ----------------- 👤 User Search (New Conversation Handler) -----------------
-
 async def start_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("You are not authorized.")
         return ConversationHandler.END
-        
+
     await update.message.reply_text(
         "👤 **USER SEARCH**\n\n"
         "Please enter the **User ID (number)** or **Username (@...)** to search for.",
@@ -1419,12 +1422,14 @@ async def start_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     return AWAIT_USER_SEARCH_ID
 
+
 async def user_search_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "👤 User Search cancelled.",
         reply_markup=ADMIN_REPLY_KEYBOARD
     )
     return ConversationHandler.END
+
 
 async def user_search_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     input_identifier = update.message.text.strip()
@@ -1433,10 +1438,10 @@ async def user_search_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not user_id_int:
         await update.message.reply_text("❌ User not found or ID/Username is invalid. Please try again or type '⬅️ Cancel'.")
         return AWAIT_USER_SEARCH_ID
-        
+
     user_data = get_user_data_from_sheet(user_id_int)
-    
-    banned_status = "BANNED" if user_data.get('banned', 'FALSE').upper() == 'TRUE' else "CLEAN"
+    is_banned = user_data.get('banned', 'FALSE').upper() == 'TRUE'
+    banned_status = "BANNED ❌" if is_banned else "CLEAN ✅"
     
     info_text = (
         f"🔍 **Search Result**\n\n"
@@ -1444,48 +1449,63 @@ async def user_search_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"🔸 **User ID:** `{user_data.get('user_id')}`\n"
         f"🔸 **Status:** **{banned_status}**\n"
         f"🔸 **Coin Balance:** **{int(user_data.get('coin_balance', '0')):,}** Coins\n"
-        f"🔸 **Total Purchase:** {int(user_data.get('total_purchase', '0')):,} MMK\n"
         f"🔸 **Registered Since:** {user_data.get('registration_date')}\n"
     )
+
+    # Use unique callback data to distinguish from cash control (toggleban|<user_id>|<status>)
+    action_text = "✅ UNBAN User" if is_banned else "❌ BAN User"
+    action_status = "unban" if is_banned else "ban"
     
-    # Inline buttons for action (Ban/Unban)
-    is_banned = user_data.get('banned', 'FALSE').upper() == 'TRUE'
-    action_button = InlineKeyboardButton(
-        "✅ Unban User" if is_banned else "⛔ Ban User",
-        callback_data=f"toggleban|{user_id_int}|{'unban' if is_banned else 'ban'}"
-    )
-    
-    keyboard = InlineKeyboardMarkup([[action_button]])
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(action_text, callback_data=f"toggleban|{user_id_int}|{action_status}")]
+    ])
     
     await update.message.reply_text(info_text, parse_mode="Markdown", reply_markup=keyboard)
     
-    # Return to the main admin keyboard
-    await update.message.reply_text("Action complete. Returning to Admin Menu.", reply_markup=ADMIN_REPLY_KEYBOARD)
     return ConversationHandler.END
+
 
 async def toggle_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    data = query.data # toggleban|<user_id>|<status>
     
     if not is_admin(query.from_user.id):
-        await query.message.reply_text("You are not authorized.")
+        await query.message.reply_text("You are not authorized to perform this action.")
         return
         
-    data = query.data.split("|")
+    parts = data.split("|")
+    if len(parts) != 3:
+        # This is the error the user was seeing when the Broadcast Conversation failed to handle its callback
+        await query.message.reply_text("Invalid Ban/Unban parameter. Awaiting final confirmation...", parse_mode="Markdown")
+        return
+
+    _, user_id_str, status = parts
     try:
-        user_id = int(data[1])
-        action = data[2] # 'ban' or 'unban'
-    except Exception:
-        await query.message.edit_text("Invalid Ban/Unban parameter.")
+        user_id = int(user_id_str)
+    except ValueError:
+        await query.message.reply_text("Invalid user ID parameter.")
+        return
+
+    if status == 'ban':
+        set_user_banned_status(user_id, True)
+        msg = f"User ID `{user_id}` has been **BANNED ❌**."
+        new_action_text = "✅ UNBAN User"
+        new_action_status = "unban"
+    elif status == 'unban':
+        set_user_banned_status(user_id, False)
+        msg = f"User ID `{user_id}` has been **UNBANNED ✅**."
+        new_action_text = "❌ BAN User"
+        new_action_status = "ban"
+    else:
+        await query.message.reply_text("Invalid ban status action.")
         return
         
-    new_status = (action == 'ban')
+    new_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(new_action_text, callback_data=f"toggleban|{user_id}|{new_action_status}")]
+    ])
     
-    if set_user_banned_status(user_id, new_status):
-        new_text = "⛔ BANNED" if new_status else "✅ UNBANNED"
-        await query.message.edit_text(f"User `{user_id}` has been successfully **{new_text}**.", parse_mode="Markdown")
-    else:
-        await query.message.edit_text(f"❌ Failed to update ban status for user `{user_id}`.")
+    await query.message.edit_text(msg, parse_mode="Markdown", reply_markup=new_keyboard)
 
 
 # ----------------- 👾 Broadcast (New Conversation Handler) -----------------
@@ -1493,10 +1513,10 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("You are not authorized.")
         return ConversationHandler.END
-        
+
     await update.message.reply_text(
         "👾 **BROADCAST MESSAGE**\n\n"
-        "Please send the **message (text, photo, video, GIF, or sticker)** you want to broadcast to all users.",
+        "Please send the **message (text or photo + caption)** you want to broadcast to all users.",
         parse_mode="Markdown",
         reply_markup=ADMIN_CANCEL_KEYBOARD
     )
@@ -1510,128 +1530,59 @@ async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     return ConversationHandler.END
 
-# MODIFIED: Logic to handle all media types (Photo, Video, GIF, Sticker, Text) - FIX EDIT_TEXT ERROR
 async def confirm_broadcast_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     message = update.effective_message
     
-    # 1. Determine media type and file ID
-    media_type = None
-    file_id = None
-    
-    if message.photo:
-        media_type = 'photo'
-        file_id = message.photo[-1].file_id
-    elif message.video:
-        media_type = 'video'
-        file_id = message.video.file_id
-    elif message.animation: # Handles GIFs
-        media_type = 'animation'
-        file_id = message.animation.file_id
-    elif message.sticker:
-        media_type = 'sticker'
-        file_id = message.sticker.file_id
-    elif message.text:
-        media_type = 'text'
-        # No file_id needed for pure text message
+    # Check if content is provided (text or photo/caption)
+    if not (message.text_html or message.caption_html or message.photo):
+        await update.message.reply_text("❌ Please send text or a photo with a caption.", reply_markup=ADMIN_CANCEL_KEYBOARD)
+        return AWAIT_BROADCAST_CONTENT
 
-    # Check for text/caption or media file
-    if not media_type:
-        await update.message.reply_text(
-            "⚠️ **Error:** Unsupported message type. Please send text, photo, video, GIF, or sticker.",
-            reply_markup=ADMIN_CANCEL_KEYBOARD
-        )
-        return AWAIT_BROADCAST_CONTENT # Remain in the same state
-        
     # Store message details in user_data
-    # Use a placeholder text if no text/caption is present
-    stored_text = message.text_html or message.caption_html or '*(No caption/text provided)*'
-    
     context.user_data['broadcast_message'] = {
-        'type': media_type,
-        'text': stored_text,
-        'file_id': file_id,
-        'has_media': media_type != 'text',
-        'forward_message_id': message.message_id 
+        'text': message.text_html or message.caption_html,
+        'photo_file_id': message.photo[-1].file_id if message.photo else None,
+        'has_photo': bool(message.photo),
     }
 
-    # 2. Prepare confirmation message
+    # Prepare confirmation message
     confirm_text = "✅ **Broadcast Content Received.**\n\n"
-    
-    # Display message type information
-    if media_type == 'photo':
+    if message.photo:
         confirm_text += "*(Photo attached)*\n"
-    elif media_type == 'video':
-        confirm_text += "*(Video attached)*\n"
-    elif media_type == 'animation':
-        confirm_text += "*(GIF/Animation attached)*\n"
-    elif media_type == 'sticker':
-        confirm_text += "*(Sticker attached - Note: Stickers cannot have captions)*\n"
-        # For stickers, we only show the file_id, not the text (which will be the placeholder)
-        if stored_text.startswith("*("): # Check if it's the placeholder text
-             stored_text = "N/A" # Do not show the placeholder for sticker confirmation
-             
-    if media_type != 'sticker':
-         confirm_text += f"**Content (HTML):**\n{stored_text}"
-    
+    confirm_text += f"**Content (HTML):**\n{message.text_html or message.caption_html or 'No Text Provided'}"
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 CONFIRM AND SEND BROADCAST", callback_data="broadcast_send")],
         [InlineKeyboardButton("⬅️ Cancel Broadcast", callback_data="broadcast_cancel")]
     ])
-    
-    # 3. Send confirmation back to Admin
-    
-    # FIX: Send media and confirmation message separately to avoid "Bad Request: There is no text in the message to edit"
-    if media_type in ['photo', 'video', 'animation']:
-        send_method = {
-            'photo': context.bot.send_photo,
-            'video': context.bot.send_video,
-            'animation': context.bot.send_animation
-        }.get(media_type)
-        
-        # Send the media first (optional caption)
-        await send_method(
+
+    # Send confirmation back to Admin
+    if message.photo:
+        await context.bot.send_photo(
             chat_id=update.effective_chat.id,
-            photo=file_id, 
-            caption="**[Preview]** Your broadcast media is above.",
-            parse_mode="Markdown",
-        )
-        
-        # Send the confirmation text and Inline Keyboard as a SEPARATE message
-        await update.message.reply_text(
-            f"⬆️ Message Previewed above. Do you want to proceed with the broadcast?\n\n{confirm_text}",
-            reply_markup=keyboard, 
-            parse_mode="HTML"
-        )
-        
-    elif media_type == 'sticker':
-        # Stickers do not support captions. Send the sticker, then follow up with the confirmation text.
-        await context.bot.send_sticker(
-            chat_id=update.effective_chat.id,
-            sticker=file_id
-        )
-        await update.message.reply_text(
-            f"*(Sticker sent above.)* \n\n{confirm_text}",
+            photo=message.photo[-1].file_id,
+            caption=confirm_text,
             parse_mode="HTML",
-            reply_markup=keyboard 
+            reply_markup=keyboard
         )
     else:
-        # Pure text message
-        await update.message.reply_text(confirm_text, parse_mode="HTML", reply_markup=keyboard)
-        
-    # Remove the temporary keyboard for confirmation step
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Awaiting final confirmation...", # Changed text slightly
-        reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
-    )
+        await update.message.reply_text(
+            confirm_text,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
 
+    # FIX: Removed the redundant reply_text that was causing the issue. 
+    # The return value now correctly transitions the state, and the inline keyboard is ready.
     return CONFIRM_BROADCAST
+
 
 async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-    
+
     if query.data == "broadcast_cancel":
+        # The user clicked the inline "Cancel Broadcast" button
         return await broadcast_cancel(update, context)
 
     if not is_admin(query.from_user.id):
@@ -1647,45 +1598,48 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     sent_count = 0
     failed_count = 0
     
-    # Note: Edit the final confirmation message (the one with the inline keyboard)
-    await query.message.edit_text("🚀 Starting broadcast... This may take a moment. Please wait for the final report.", reply_markup=None)
+    # Edit the confirmation message to show the start of broadcast
+    await query.message.edit_text("🚀 Starting broadcast... This may take a moment.", reply_markup=None) 
+
+    # Log broadcast start (optional, but good practice)
+    logger.info(f"Starting broadcast to {len(all_user_ids)} users.")
     
-    # Extract data for sending
-    media_type = message_data['type']
-    file_id = message_data['file_id']
-    # If the text is the placeholder, treat it as None/empty for caption purposes
-    text_for_sending = message_data['text'] if not message_data['text'].startswith('*(') else None 
-    
+    # Batch processing and error handling
     for user_id in all_user_ids:
         try:
-            if media_type == 'photo':
-                await context.bot.send_photo(chat_id=user_id, photo=file_id, caption=text_for_sending, parse_mode="HTML")
-            elif media_type == 'video':
-                await context.bot.send_video(chat_id=user_id, video=file_id, caption=text_for_sending, parse_mode="HTML")
-            elif media_type == 'animation':
-                await context.bot.send_animation(chat_id=user_id, animation=file_id, caption=text_for_sending, parse_mode="HTML")
-            elif media_type == 'sticker':
-                # Stickers do not support text/caption
-                await context.bot.send_sticker(chat_id=user_id, sticker=file_id)
-            elif media_type == 'text':
-                # Pure text message (use message_data['text'] which is guaranteed to be real text here)
-                await context.bot.send_message(chat_id=user_id, text=message_data['text'], parse_mode="HTML")
-            
+            # Check if user is the admin (don't send to admin if they are the one broadcasting, unless they are included in all_user_ids)
+            if user_id == query.from_user.id:
+                 continue # Skip self
+
+            if message_data['has_photo']:
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=message_data['photo_file_id'],
+                    caption=message_data['text'],
+                    parse_mode="HTML"
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message_data['text'],
+                    parse_mode="HTML"
+                )
             sent_count += 1
-            # Add a small delay to avoid hitting Telegram's flood limits for sending messages
-            time.sleep(0.05) 
         except Exception as e:
-            # Catch errors like "blocked by user" or "chat not found"
+            # Catch errors like 'user blocked bot', 'chat not found'
+            logger.warning(f"Failed to send broadcast to user {user_id}: {e}")
             failed_count += 1
-            logger.debug(f"Failed to send broadcast to user {user_id}: {e}")
+            
+        # Optional: Add a small sleep to avoid rate limiting if user base is large
+        # time.sleep(0.05) # Uncomment if you hit rate limits
 
     final_msg = (
         f"✅ **BROADCAST COMPLETE!**\n\n"
-        f"👥 Total Users Attempted: **{len(all_user_ids):,}**\n"
-        f"🟢 Successfully Sent: **{sent_count:,}**\n"
-        f"🔴 Failed (Blocked/Error): **{failed_count:,}**"
+        f"🚀 **Successful Sends:** {sent_count:,}\n"
+        f"❌ **Failed Sends:** {failed_count:,}"
     )
     
+    # Final message to Admin
     await context.bot.send_message(
         chat_id=query.from_user.id,
         text=final_msg,
@@ -1693,27 +1647,32 @@ async def execute_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         reply_markup=ADMIN_REPLY_KEYBOARD
     )
     
-    # Clean up context data
+    # Clean up context
     context.user_data.pop('broadcast_message', None)
+    
     return ConversationHandler.END
 
 
-# Error handler (sanitized) - Updated to use config ID
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    err_type = type(context.error).__name__ if context.error else "UnknownError"
-    err_msg = str(context.error)[:1000] if context.error else "No details"
+# ----------------- Error Handler -----------------
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Exception while handling an update:", exc_info=context.error)
+    
+    err_type = type(context.error).__name__
+    err_msg = str(context.error) or context.error.__cause__ or "No details"
     logger.error("Exception while handling an update: %s: %s", err_type, err_msg)
     
     config = get_config_data()
     admin_id_check = get_dynamic_admin_id(config)
-
+    
     try:
+        # Send error to Admin
         await context.bot.send_message(
             chat_id=admin_id_check,
             text=f"🚨 Bot Error: {err_type}\n{err_msg}",
         )
     except Exception:
-        pass
+        # If sending to admin fails, just pass silently
+        pass 
 
 
 # --------------- Main ---------------
@@ -1733,20 +1692,20 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("cancel", cancel_product_order)) # NEW: Handle /cancel command
 
-    # Admin commands (legacy /ban /unban) - REMOVED TO FIX NAMEERROR
+    # Admin commands (legacy /ban /unban)
+    # NOTE: Commenting out legacy handlers as functionality is now handled by User Search
     # application.add_handler(CommandHandler("ban", admin_ban_user))
     # application.add_handler(CommandHandler("unban", admin_unban_user))
-    
+
     # Admin Inline Callback Handlers
     application.add_handler(CallbackQueryHandler(set_bot_status_callback, pattern=r"^set_status_"))
-    application.add_handler(CallbackQueryHandler(toggle_ban_callback, pattern=r"^toggleban|"))
-
+    application.add_handler(CallbackQueryHandler(toggle_ban_callback, pattern=r"^toggleban\|"))
 
     # NEW: Admin Reply Keyboard Handlers
     application.add_handler(MessageHandler(filters.Text("⚙️ Close to Selling"), handle_close_to_selling))
     application.add_handler(MessageHandler(filters.Text("📊 Statistics"), handle_statistics))
     application.add_handler(MessageHandler(filters.Text("🔄 Refresh Config"), handle_refresh_config))
-    
+
     # Payment Conversation Handler (entry: Payment Method button)
     payment_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("💰 Payment Method"), handle_payment_method)],
@@ -1759,43 +1718,36 @@ def main():
                 CallbackQueryHandler(back_to_payment_menu, pattern=r"^payment_back$"),
             ],
             WAITING_FOR_RECEIPT: [
-                MessageHandler(filters.PHOTO | filters.TEXT, receive_receipt),
-                CallbackQueryHandler(back_to_payment_menu, pattern=r"^payment_back$"),
+                MessageHandler(filters.PHOTO | filters.TEXT & ~filters.COMMAND, receive_receipt)
             ],
         },
-        fallbacks=[CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$")], # Updated fallback to main menu
-        allow_reentry=True,
+        # Allow /start and other commands to exit gracefully
+        fallbacks=[CommandHandler("start", start_command)], 
     )
     application.add_handler(payment_conv_handler)
-
-    # Product Conversation Handler (entry: Inline buttons)
-    product_purchase_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_product_purchase, pattern=r"^product_")],
+    
+    # Product Purchase Conversation Handler (entry: Inline Product buttons)
+    # The initial product selection is handled by a separate inline handler (start_product_purchase)
+    # which leads to the SELECT_PRODUCT_PRICE state.
+    product_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(handle_product_select, pattern=r"^(star_|premium_)")], # Starts AFTER initial product type selection
         states={
-            SELECT_PRODUCT_PRICE: [
-                CallbackQueryHandler(select_product_price, pattern=r"^(star_|premium_).*"),
-                CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"),
-            ],
             WAITING_FOR_PHONE: [
-                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order), # NEW: Cancel button handler
-                MessageHandler(filters.TEXT & ~filters.COMMAND, validate_phone_and_ask_username)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("❌ Cancel Order"), get_premium_phone)
             ],
             WAITING_FOR_USERNAME: [
-                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order), # NEW: Cancel button handler
-                MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_product_order)
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("❌ Cancel Order"), finalize_product_order)
             ],
         },
-        # NEW: Added MessageHandler for "❌ Cancel Order" to catch button press in all states
         fallbacks=[
-            CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"),
-            MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order) 
-        ],
-        allow_reentry=True,
+            MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order),
+            CommandHandler("start", start_command)
+        ]
     )
-    application.add_handler(product_purchase_handler)
+    application.add_handler(product_conv_handler)
 
-    # NEW: Cash Control Conversation Handler
-    cash_control_handler = ConversationHandler(
+    # Cash Control Conversation Handler
+    cash_control_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("📝 Cash Control"), start_cash_control)],
         states={
             AWAIT_CASH_CONTROL_ID: [
@@ -1803,45 +1755,41 @@ def main():
             ],
             AWAIT_CASH_CONTROL_AMOUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), cash_control_apply_amount)
-            ]
+            ],
         },
         fallbacks=[MessageHandler(filters.Text("⬅️ Cancel"), cash_control_cancel)],
-        allow_reentry=True
     )
-    application.add_handler(cash_control_handler)
-    
-    # NEW: User Search Conversation Handler
-    user_search_handler = ConversationHandler(
+    application.add_handler(cash_control_conv_handler)
+
+    # User Search Conversation Handler
+    user_search_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("👤 User Search"), start_user_search)],
         states={
             AWAIT_USER_SEARCH_ID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), user_search_get_id)
-            ]
+            ],
         },
         fallbacks=[MessageHandler(filters.Text("⬅️ Cancel"), user_search_cancel)],
-        allow_reentry=True
     )
-    application.add_handler(user_search_handler)
+    application.add_handler(user_search_conv_handler)
     
-    # NEW: Broadcast Conversation Handler (Updated to filters.ALL)
-    broadcast_handler = ConversationHandler(
+    # Broadcast Conversation Handler
+    broadcast_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("👾 Broadcast"), start_broadcast)],
         states={
             AWAIT_BROADCAST_CONTENT: [
-                # Accept all messages except commands and the cancel button text
-                MessageHandler(filters.ALL & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), confirm_broadcast_content)
+                MessageHandler(filters.PHOTO | filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), confirm_broadcast_content)
             ],
             CONFIRM_BROADCAST: [
-                CallbackQueryHandler(execute_broadcast, pattern=r"broadcast_send|broadcast_cancel")
+                # The callback must be caught here to prevent it from falling through to global handlers
+                CallbackQueryHandler(execute_broadcast, pattern=r"^(broadcast_send|broadcast_cancel)$")
             ]
         },
         fallbacks=[MessageHandler(filters.Text("⬅️ Cancel"), broadcast_cancel)],
-        allow_reentry=True
     )
-    application.add_handler(broadcast_handler)
-
-
-    # Message handlers for reply keyboard (Main Menu)
+    application.add_handler(broadcast_conv_handler)
+    
+    # Other Reply Keyboard Handlers
     application.add_handler(MessageHandler(filters.Text("👤 User Info"), handle_user_info))
     application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center))
     
@@ -1872,8 +1820,8 @@ def main():
         logger.info("Setting webhook URL to: %s", webhook_url)
         application.run_webhook(listen=listen, port=port, url_path=url_path, webhook_url=webhook_url)
     else:
-        logger.info("RENDER_EXTERNAL_URL not set — using long polling (development mode).")
-        application.run_polling()
+        logger.info("RENDER_EXTERNAL_URL not set. Falling back to polling.")
+        application.run_polling(poll_interval=1.0, timeout=20)
 
 
 if __name__ == "__main__":
