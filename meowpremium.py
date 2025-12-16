@@ -63,6 +63,8 @@ CONFIG_TTL_SECONDS = int(os.environ.get("CONFIG_TTL_SECONDS", "25"))
 
 # NEW: States for Cash Control Conversation (START at 30)
 AWAIT_CASH_CONTROL_ID, AWAIT_CASH_CONTROL_AMOUNT = range(30, 32)
+# NEW: States for Broadcast Conversation
+BROADCAST_WRITE, BROADCAST_CONFIRM = range(40, 42)
 
 
 # ------------ Helper: Retry wrapper for sheet init ----------------
@@ -399,7 +401,13 @@ def normalize_username(raw: str) -> str:
         return ""
     return "@" + m.group(1)
 
-
+def is_markdown_safe(text: str) -> bool:
+    symbols = ["*", "_", "`", "["]
+    for s in symbols:
+        if text.count(s) % 2 != 0:
+            return False
+    return True
+    
 def parse_amount_from_text(text: str) -> Optional[int]:
     if not text:
         return None
@@ -804,9 +812,9 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
             text="❌ Admin has denied your payment/receipt. Please contact support or retry the payment.",
         )
         await query.message.edit_text("❌ Denied and user notified.")
-    except Exception as e:
+    except Exception asas 
         logger.error("Failed to notify user after denial: %s", e)
-        await query.message.edit_text("Denied but failed to notify user.")
+        await query.message.("Denied but failed to notify user.")
 
 
 # ----------- Product purchase flow (NEW CANCEL BUTTONS ADDED) -----------
@@ -1108,7 +1116,97 @@ async def show_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text("⚙️ Bot Status control functionality here.")
 
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👾 Broadcast functionality here.")
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    if update.effective_user.id != admin_id_check:
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "👾 **Broadcast Dashboard**\n\n"
+        "📨 ပို့ချင်တဲ့ စာကို ပို့ပါ (Markdown Support ရပါတယ်)\n"
+        "👁️ မပို့ခင် Preview ပြပါမယ်",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup([["❌ Cancel Broadcast"]], resize_keyboard=True)
+    )
+    return BROADCAST_WRITE
+
+async def broadcast_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == "❌ Cancel Broadcast":
+        return await broadcast_cancel_msg(update, context)
+
+    if not is_markdown_safe(text):
+        await update.message.reply_text(
+            "❌ **Markdown Error တွေ့ပါတယ်**\n\n"
+            "Bold (*) သို့မဟုတ် Italic (_) အဖွင့်အပိတ် မညီတာမျိုး စစ်ပေးပါ။\n\n"
+            "✏️ ပြင်ပြီး ထပ်ပို့ပါ သို့မဟုတ် Cancel နှိပ်ပါ။",
+            parse_mode="Markdown"
+        )
+        return BROADCAST_WRITE
+
+    context.user_data["broadcast_text"] = text
+    preview_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Send Now", callback_data="bc_send")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="bc_cancel")]
+    ])
+
+    await update.message.reply_text(
+        "👁️ **Broadcast Preview**\n\n" + text,
+        reply_markup=preview_keyboard,
+        parse_mode="Markdown"
+    )
+    return BROADCAST_CONFIRM
+
+async def broadcast_send_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    text = context.user_data.get("broadcast_text")
+    if not text:
+        await query.message.edit_text("Data Error.")
+        return ConversationHandler.END
+
+    # User list ကို Google Sheet ရဲ့ column A ကနေ ယူခြင်း
+    users = WS_USER_DATA.col_values(1)[1:] 
+    success = failed = 0
+
+    await query.message.edit_text("📡 Broadcasting to all users... Please wait.")
+
+    for uid in users:
+        try:
+            if uid.isdigit():
+                await context.bot.send_message(chat_id=int(uid), text=text, parse_mode="Markdown")
+                success += 1
+                await asyncio.sleep(0.05) # Rate limit protection
+        except Exception:
+            failed += 1
+
+    await context.bot.send_message(
+        chat_id=query.from_user.id,
+        text=(
+            "✅ **Broadcast Completed**\n\n"
+            f"📤 Sent: {success}\n"
+            f"❌ Failed: {failed}"
+        ),
+        parse_mode="Markdown",
+        reply_markup=ADMIN_REPLY_KEYBOARD
+    )
+    context.user_data.pop("broadcast_text", None)
+    return ConversationHandler.END
+
+async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop("broadcast_text", None)
+    await query.message.edit_text("❌ Broadcast cancelled.", reply_markup=ADMIN_REPLY_KEYBOARD)
+    return ConversationHandler.END
+
+async def broadcast_cancel_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("broadcast_text", None)
+    await update.message.reply_text("❌ Broadcast cancelled.", reply_markup=ADMIN_REPLY_KEYBOARD)
+    return ConversationHandler.END
     
 async def handle_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👤 User Search functionality here.")
@@ -1211,90 +1309,6 @@ async def cash_control_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE
     return AWAIT_CASH_CONTROL_AMOUNT
 
 # Function to apply the coin change and finish
-async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
-    
-    if user.id != admin_id_check:
-        await update.message.reply_text("❌ သင်သည် Admin မဟုတ်ပါ။")
-        return
-
-    if not context.args:
-        await update.message.reply_text("💡 စာပို့ရန် format: `/broadcast သင်ပို့လိုသောစာ`", parse_mode="Markdown")
-        return
-
-    broadcast_msg = " ".join(context.args)
-    all_users = WS_USER_DATA.get_all_values()[1:] 
-    
-    success_count = 0
-    fail_count = 0
-
-    await update.message.reply_text(f"🚀 အသုံးပြုသူ {len(all_users)} ဦးထံ စာပို့နေပါပြီ...")
-
-    for row in all_users:
-        try:
-            target_id = int(row[0])
-            await context.bot.send_message(chat_id=target_id, text=f"📢 **သတင်းလွှာ**\n\n{broadcast_msg}", parse_mode="Markdown")
-            success_count += 1
-        except Exception:
-            fail_count += 1
-    
-    await update.message.reply_text(f"✅ ပို့ဆောင်ပြီးစီးပါပြီ။\nအောင်မြင်: {success_count}\nကျရှုံး: {fail_count}")
-
-async def handle_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
-    
-    if user.id != admin_id_check: return
-
-    if not context.args:
-        await update.message.reply_text("🔍 ရှာရန် format: `/search <user_id>`")
-        return
-
-    search_query = context.args[0]
-    all_users = WS_USER_DATA.get_all_records()
-    found_user = None
-
-    for u in all_users:
-        if str(u['user_id']) == search_query:
-            found_user = u
-            break
-
-    if found_user:
-        msg = (
-            f"🔍 **အသုံးပြုသူ အချက်အလက်**\n"
-            f"🆔 ID: `{found_user['user_id']}`\n"
-            f"👤 Name: {found_user['username']}\n"
-            f"💰 Coins: {found_user['coin_balance']}\n"
-            f"📅 Joined: {found_user['registration_date']}"
-        )
-        await update.message.reply_text(msg, parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ အသုံးပြုသူ မတွေ့ရှိပါ။")
-
-async def handle_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
-    
-    if user.id != admin_id_check: return
-
-    users_count = len(WS_USER_DATA.get_all_values()) - 1
-    orders_count = len(WS_ORDERS.get_all_values()) - 1
-    
-    stats_msg = (
-        f"📊 **Bot စာရင်းဇယား**\n\n"
-        f"👥 စုစုပေါင်းအသုံးပြုသူ: {users_count} ဦး\n"
-        f"📦 စုစုပေါင်း Order အရေအတွက်: {orders_count} ခု"
-    )
-    await update.message.reply_text(stats_msg, parse_mode="Markdown")
-
-async def show_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ဤနေရာတွင် Admin Menu ပြသရန် သို့မဟုတ် status ပြောင်းရန် ထည့်နိုင်သည်
-    await update.message.reply_text("⚙️ Admin Settings System is active.")
-    
 async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     amount_text = update.message.text.strip()
     target_user_id = context.user_data.get('target_cash_control_id')
@@ -1313,7 +1327,7 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
 
     try:
         coin_change = int(match.group(1))
-    except ValueError:
+        except ValueError:
         await update.message.reply_text("❌ The number provided is too large or not a valid integer.")
         return AWAIT_CASH_CONTROL_AMOUNT
 
@@ -1417,11 +1431,6 @@ def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Admin Commands (ဒီစာကြောင်းတွေကို add_handler တွေရှိတဲ့နေရာမှာ ထည့်ပါ)
-    application.add_handler(CommandHandler("broadcast", handle_broadcast))
-    application.add_handler(CommandHandler("search", handle_user_search))
-    application.add_handler(CommandHandler("stats", handle_statistics))
-    
     # Command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("cancel", cancel_product_order)) # NEW: Handle /cancel command
@@ -1432,8 +1441,24 @@ def main():
     
     # NEW: Message handlers for Admin Reply Keyboard (placeholders)
     application.add_handler(MessageHandler(filters.Text("⚙️ Close to Selling"), show_admin_settings))
-    application.add_handler(MessageHandler(filters.Text("👾 Broadcast"), handle_broadcast))
-    application.add_handler(MessageHandler(filters.Text("👤 User Search"), handle_user_search))
+    application.
+    # Broadcast Conversation Handler
+    broadcast_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Text("👾 Broadcast"), handle_broadcast)],
+        states={
+            BROADCAST_WRITE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_preview)
+            ],
+            BROADCAST_CONFIRM: [
+                CallbackQueryHandler(broadcast_send_confirm, pattern="^bc_send$"),
+                CallbackQueryHandler(broadcast_cancel, pattern="^bc_cancel$")
+            ],
+        },
+        fallbacks=[MessageHandler(filters.Text("❌ Cancel Broadcast"), broadcast_cancel_msg)],
+        allow_reentry=True
+    )
+    application.add_handler(broadcast_handler)
+    add_handler(MessageHandler(filters.Text("👤 User Search"), handle_user_search))
     application.add_handler(MessageHandler(filters.Text("🔄 Refresh Config"), handle_refresh_config))
     application.add_handler(MessageHandler(filters.Text("📊 Statistics"), handle_statistics))
 
