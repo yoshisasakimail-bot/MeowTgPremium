@@ -5,6 +5,7 @@ import json
 import datetime
 import re
 import uuid
+import asyncio
 from typing import Dict, Optional
 import gspread
 from google.auth.transport.requests import Request
@@ -35,9 +36,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------- ENV / Globals -----------------
-# MODIFIED: Define ADMIN_ID_DEFAULT for explicit fallback
 ADMIN_ID_DEFAULT = 123456789
-ADMIN_ID = int(os.environ.get("ADMIN_ID", ADMIN_ID_DEFAULT)) # Keep ADMIN_ID as the initial default/fallback from ENV
+ADMIN_ID = int(os.environ.get("ADMIN_ID", ADMIN_ID_DEFAULT))
 SHEET_ID = os.environ.get("SHEET_ID", "")
 GSPREAD_SA_JSON = os.environ.get("GSPREAD_SA_JSON", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -63,8 +63,6 @@ CONFIG_TTL_SECONDS = int(os.environ.get("CONFIG_TTL_SECONDS", "25"))
     WAITING_FOR_USERNAME,
     SELECT_COIN_PACKAGE,
 ) = range(6)
-
-# Cash Control states are now imported from admincommands.py
 
 # ------------ Helper: Retry wrapper for sheet init ----------------
 def initialize_sheets(retries: int = 3, backoff: float = 2.0) -> bool:
@@ -133,12 +131,99 @@ def get_config_data(force_refresh: bool = False) -> Dict[str, str]:
 def get_dynamic_admin_id(config: Dict) -> int:
     """Retrieves ADMIN_ID from config sheet, falls back to global ADMIN_ID."""
     try:
-        # Try to get from config sheet, fallback to global ADMIN_ID (which is 123456789 or from Render ENV)
         return int(config.get("admin_contact_id", ADMIN_ID))
     except (ValueError, TypeError):
-        # If the value in the sheet is not a valid integer, use the global default
         logger.warning("admin_contact_id in sheet is invalid or missing. Using fallback: %s", ADMIN_ID)
         return ADMIN_ID
+
+
+# ------------ Bot Status Control ----------------
+def is_selling_open() -> bool:
+    """Check if selling is open from config sheet"""
+    config = get_config_data()
+    selling_status = config.get("selling_status", "open").lower()
+    return selling_status == "open"
+
+def set_selling_status(status: bool) -> bool:
+    """Update selling status in config sheet"""
+    global WS_CONFIG
+    if not WS_CONFIG:
+        logger.error("WS_CONFIG not available for set_selling_status")
+        return False
+    try:
+        # Find the "selling_status" key
+        cell = WS_CONFIG.find("selling_status", in_column=1)
+        if cell:
+            WS_CONFIG.update_cell(cell.row, 2, "open" if status else "closed")
+            logger.info(f"Updated selling status to: {'open' if status else 'closed'}")
+        else:
+            # If not found, add new row
+            WS_CONFIG.append_row(["selling_status", "open" if status else "closed"])
+            logger.info(f"Added new selling_status row: {'open' if status else 'closed'}")
+        
+        # Refresh config cache
+        get_config_data(force_refresh=True)
+        return True
+    except Exception as e:
+        logger.error(f"Error setting selling status: {e}")
+        return False
+
+# ------------ Broadcast System ----------------
+async def send_broadcast_to_all_users(context: ContextTypes.DEFAULT_TYPE, message_text: str):
+    """Send broadcast message to all users in user_data sheet"""
+    global WS_USER_DATA
+    if not WS_USER_DATA:
+        logger.error("WS_USER_DATA not available for broadcast")
+        return 0, []
+    
+    try:
+        all_users = WS_USER_DATA.get_all_records()
+        successful = 0
+        failed_users = []
+        
+        logger.info(f"Starting broadcast to {len(all_users)} users")
+        
+        for user in all_users:
+            try:
+                user_id_str = str(user.get("user_id", "")).strip()
+                if not user_id_str or not user_id_str.isdigit():
+                    continue
+                    
+                user_id = int(user_id_str)
+                
+                # Skip if user is banned
+                banned = str(user.get("banned", "FALSE")).upper() == "TRUE"
+                if banned:
+                    logger.debug(f"Skipping banned user: {user_id}")
+                    continue
+                
+                if user_id > 0:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=message_text,
+                        parse_mode="Markdown"
+                    )
+                    successful += 1
+                    
+                    # Log every 10 users for progress tracking
+                    if successful % 10 == 0:
+                        logger.info(f"Broadcast progress: {successful} users sent")
+                    
+                    # Small delay to avoid rate limiting
+                    await asyncio.sleep(0.1)
+                    
+            except Exception as e:
+                failed_user_id = user.get("user_id", "Unknown")
+                failed_users.append(failed_user_id)
+                logger.error(f"Failed to send broadcast to {failed_user_id}: {e}")
+                await asyncio.sleep(0.5)
+        
+        logger.info(f"Broadcast completed: {successful} successful, {len(failed_users)} failed")
+        return successful, failed_users
+        
+    except Exception as e:
+        logger.error(f"Error in broadcast system: {e}")
+        return 0, []
 
 
 # ------------ User data helpers ----------------
@@ -166,14 +251,13 @@ def get_user_data_from_sheet(user_id: int) -> Dict[str, str]:
             return default
         row_values = WS_USER_DATA.row_values(row)
 
-        # FIX: Ensure coin_balance is clean (strip whitespace) before returning
         coin_balance_raw = row_values[2] if len(row_values) > 2 else "0"
         clean_coin_balance = coin_balance_raw.strip()
         
         data = {
             "user_id": row_values[0] if len(row_values) > 0 else str(user_id),
             "username": row_values[1] if len(row_values) > 1 else "N/A",
-            "coin_balance": clean_coin_balance, # Use the cleaned value
+            "coin_balance": clean_coin_balance,
             "registration_date": row_values[3] if len(row_values) > 3 else "N/A",
             "last_active": row_values[4] if len(row_values) > 4 else "",
             "total_purchase": row_values[5] if len(row_values) > 5 else "0",
@@ -274,20 +358,16 @@ def get_payment_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-# MODIFIED: Show price in Coin instead of MMK
 def get_product_keyboard(product_type: str) -> InlineKeyboardMarkup:
     config = get_config_data()
     keyboard_buttons = []
     prefix = f"{product_type}_"
     product_keys = sorted([k for k in config.keys() if k.startswith(prefix)])
     
-    # NEW: Determine icon and get Coin Rate from config
-    icon = '⭐' if product_type == 'star' else '❄️' # Using ❄️ as requested
+    icon = '⭐' if product_type == 'star' else '❄️'
     coin_rate_key = f"coin_rate_{product_type}"
     
-    # Use 1000 if not found in config to avoid division by zero.
     try:
-        # Get the coin rate (MMK price to 1 Coin)
         coin_rate_mmk = float(config.get(coin_rate_key, "1000")) 
     except ValueError:
         coin_rate_mmk = 1000.0
@@ -301,31 +381,22 @@ def get_product_keyboard(product_type: str) -> InlineKeyboardMarkup:
             try:
                 price_mmk = int(price_mmk_str)
             except ValueError:
-                continue # Skip if MMK price is invalid
+                continue
             
-            # Calculate Coin Price: MMK Price / Coin Rate (MMK per 1 Coin)
-            # Use ceiling to round up to the nearest integer Coin
             price_coin = int(price_mmk / coin_rate_mmk) 
-            
-            # Ensure price is at least 1 Coin
-            price_coin = max(1, price_coin) 
+            price_coin = max(1, price_coin)
 
             button_name = key.replace(prefix, "").replace("_", " ").title()
-            
-            # MODIFIED: Display Coin Price
             button_text = f"{icon} {button_name} ({price_coin} Coins)" 
             keyboard_buttons.append([InlineKeyboardButton(button_text, callback_data=f"{key}")])
 
-    # Go back to the menu where the 'Premium & Star' button is visible
     keyboard_buttons.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]) 
     return InlineKeyboardMarkup(keyboard_buttons)
 
 
-# Coin package keyboard (reads config coinpkg_ keys, else uses defaults)
 def get_coin_package_keyboard() -> InlineKeyboardMarkup:
     config = get_config_data()
     buttons = []
-    # collect coinpkg_ keys
     coin_items = []
     for k, v in config.items():
         if k.startswith("coinpkg_"):
@@ -336,14 +407,12 @@ def get_coin_package_keyboard() -> InlineKeyboardMarkup:
             except Exception:
                 continue
     if not coin_items:
-        # defaults:
         coin_items = [
             (1000, 2000),
             (2000, 4000),
             (5000, 10000),
             (10000, 20000),
         ]
-    # sort by coin_count asc
     coin_items.sort(key=lambda x: x[0])
     for coins, mmk in coin_items:
         txt = f"🟡 {coins} Coins — {mmk} MMK"
@@ -352,14 +421,12 @@ def get_coin_package_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-# MODIFIED: Reply keyboard now includes the new "Premium & Star" and "Help Center" button
 ENGLISH_REPLY_KEYBOARD = [
     [KeyboardButton("👤 User Info"), KeyboardButton("💰 Payment Method")],
-    [KeyboardButton("❓ Help Center"), KeyboardButton("✨ Premium & Star")] # Added new button
+    [KeyboardButton("❓ Help Center"), KeyboardButton("✨ Premium & Star")]
 ]
 MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(ENGLISH_REPLY_KEYBOARD, resize_keyboard=True, one_time_keyboard=False)
 
-# NEW: Admin Only Reply Keyboard (Including all new buttons)
 ADMIN_REPLY_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("👤 User Info"), KeyboardButton("💰 Payment Method")],
@@ -372,21 +439,18 @@ ADMIN_REPLY_KEYBOARD = ReplyKeyboardMarkup(
     one_time_keyboard=False
 )
 
-
-# New inline keyboard for the service selection (only Star and Premium)
 PRODUCT_SELECTION_INLINE_KEYBOARD = InlineKeyboardMarkup(
     [
         [InlineKeyboardButton("⭐ Telegram Star", callback_data="product_star")],
-        [InlineKeyboardButton("❄️ Telegram Premium", callback_data="product_premium")], # MODIFIED: Changed to ❄️
-        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")] # Added back button
+        [InlineKeyboardButton("❄️ Telegram Premium", callback_data="product_premium")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]
     ]
 )
 
-# NEW: Reply keyboard for cancelling product purchase flow
 CANCEL_KEYBOARD = ReplyKeyboardMarkup(
     [[KeyboardButton("❌ Cancel Order")]],
     resize_keyboard=True,
-    one_time_keyboard=True # Use one_time_keyboard for temporary keyboards
+    one_time_keyboard=True
 )
 
 
@@ -415,36 +479,29 @@ def parse_amount_from_text(text: str) -> Optional[int]:
 
 
 # ------------ Handlers ----------------
-# MODIFIED: start_command uses the new welcome message format AND checks for Admin status
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     register_user_if_not_exists(user.id, user.full_name)
     if is_user_banned(user.id):
-        # Keep Burmese ban message as it is likely crucial for the audience
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားထားသည်။ Support ထံ ဆက်သွယ်ပါ။")
         return
         
     config = get_config_data()
     admin_id_check = get_dynamic_admin_id(config)
     
-    # Check if the user is the Admin from the config sheet
     is_admin = (user.id == admin_id_check)
 
-    # MODIFIED: Updated welcome message format
     welcome_text = (
         f"Hello, 👑**{user.full_name}**\n\n"
         f"🧸Welcome — Meow Telegram Bot 🫶\n"
         f"To make a purchase with excellent service and advanced functionality, choose from the menu below."
     )
     
-    # Use Admin Keyboard if the user is Admin, otherwise use the standard menu
     keyboard_to_use = ADMIN_REPLY_KEYBOARD if is_admin else MAIN_MENU_KEYBOARD
 
-    # Send the main menu reply keyboard
     await update.message.reply_text(welcome_text, reply_markup=keyboard_to_use, parse_mode="Markdown")
 
 
-# NEW: Function to display the Star/Premium inline buttons, triggered by the new Reply Button
 async def show_product_inline_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_user_banned(user.id):
@@ -452,12 +509,9 @@ async def show_product_inline_menu(update: Update, context: ContextTypes.DEFAULT
         return
 
     text = "✨ Available Services (Star & Premium):\nPlease select an option below:"
-    
-    # Send the inline keyboard only
     await update.message.reply_text(text, reply_markup=PRODUCT_SELECTION_INLINE_KEYBOARD)
 
 
-# MODIFIED: Does not show service menu afterwards
 async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_user_banned(user.id):
@@ -472,12 +526,10 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔸 **Registered Since:** {data.get('registration_date')}\n"
         f"🔸 **Banned:** {data.get('banned')}\n"
     )
-    # Use menu_back to return to the main menu (no inline service menu here)
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]])
     await update.message.reply_text(info_text, reply_markup=back_keyboard, parse_mode="Markdown")
 
 
-# MODIFIED: Does not show service menu afterwards
 async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = get_config_data()
     admin_username = config.get("admin_contact_username", "@Admin")
@@ -486,28 +538,22 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"For assistance, contact the administrator:\nAdmin Contact: **{admin_username}**\n\n"
         "We will respond as soon as possible."
     )
-    # Use menu_back to return to the main menu (no inline service menu here)
     back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]])
     if update.callback_query:
-        # If triggered from a previous inline keyboard (which shouldn't happen now), reply.
         await update.callback_query.message.reply_text(help_text, reply_markup=back_keyboard, parse_mode="Markdown")
     else:
-        # Primary entry point from the reply button
         await update.message.reply_text(help_text, reply_markup=back_keyboard, parse_mode="Markdown")
 
 
-# ----------- Payment Flow (coin package -> payment method -> receipt) -----------
-# MODIFIED: Entry point for conversation from the reply keyboard.
+# ----------- Payment Flow -----------
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
         return ConversationHandler.END
-    # Show coin package keyboard first
     if update.callback_query:
         await update.callback_query.message.reply_text("💰 Select Coin Package:", reply_markup=get_coin_package_keyboard())
     else:
-        # Primary entry point from the reply button
         await update.message.reply_text("💰 Select Coin Package:", reply_markup=get_coin_package_keyboard())
     return SELECT_COIN_PACKAGE
 
@@ -515,7 +561,6 @@ async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
 async def handle_coin_package_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # callback data format: buycoin_<coins>_<mmk>
     parts = query.data.split("_")
     try:
         coins = int(parts[1])
@@ -523,9 +568,7 @@ async def handle_coin_package_select(update: Update, context: ContextTypes.DEFAU
     except Exception:
         await query.message.reply_text("Invalid package selected.")
         return ConversationHandler.END
-    # store package selection
     context.user_data["selected_coinpkg"] = {"coins": coins, "mmk": mmk}
-    # Then show payment method buttons
     await query.message.edit_text(
         f"💳 You selected **{coins} Coins — {mmk} MMK**.\nPlease choose payment method:",
         reply_markup=get_payment_keyboard(),
@@ -537,7 +580,7 @@ async def handle_coin_package_select(update: Update, context: ContextTypes.DEFAU
 async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    cd = query.data  # e.g., pay_kpay
+    cd = query.data
     parts = cd.split("_")
     if len(parts) < 2:
         await query.message.reply_text("Invalid payment method selected.")
@@ -546,7 +589,6 @@ async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
     config = get_config_data()
     admin_name = config.get(f"{payment_method}_name", "Admin Name")
     phone_number = config.get(f"{payment_method}_phone", "09XXXXXXXXX")
-    # Show selected package summary if exists
     pkg = context.user_data.get("selected_coinpkg")
     pkg_text = ""
     if pkg:
@@ -565,7 +607,6 @@ async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def back_to_payment_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    # Go back to coin package selection, not just payment methods
     await query.message.edit_text("💰 Select Coin Package:", reply_markup=get_coin_package_keyboard())
     return SELECT_COIN_PACKAGE
 
@@ -577,18 +618,16 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     config = get_config_data()
-    # BUG FIX: Get Admin ID from config data, falling back to global ADMIN_ID
     admin_contact_id = get_dynamic_admin_id(config)
     
     timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    # FIX: Use a short Unix timestamp for callback data to avoid Button_data_invalid error
     short_ts = int(time.time())
     
     receipt_meta = {
         "from_user_id": user.id,
         "from_username": user.username or user.full_name,
         "timestamp": timestamp,
-        "short_ts": short_ts, # Store short timestamp
+        "short_ts": short_ts,
         "package": context.user_data.get("selected_coinpkg"),
     }
     context.user_data["last_receipt_meta"] = receipt_meta
@@ -596,7 +635,6 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     detected_amount = None
     try:
         if update.message.photo:
-            # forward photo
             await update.message.forward(chat_id=admin_contact_id)
             detected_amount = parse_amount_from_text(update.message.caption or "")
         else:
@@ -605,43 +643,32 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             forwarded_text = f"📥 Receipt (text) from @{user.username or user.full_name} (id:{user.id})\nTime: {timestamp}\n\n{text}"
             await context.bot.send_message(chat_id=admin_contact_id, text=forwarded_text)
 
-        # Build approve buttons with amounts from config or defaults
         amounts_cfg = config.get("receipt_approve_amounts", "")
-        # MODIFIED: Use the new requested default amounts (Request 1)
         default_choices = [19000, 20000, 50000, 100000]
 
         if amounts_cfg:
             try:
-                # ဤနေရာတွင် စာလုံးမှားယွင်းပါက ValueError တက်ပါသည်။
-                # FIX: Remove any potential non-digit/non-comma characters before split
                 clean_amounts_cfg = "".join(c for c in amounts_cfg if c.isdigit() or c == ',')
                 choices = [int(x.strip()) for x in clean_amounts_cfg.split(",") if x.strip() and x.strip().isdigit()]
             except Exception:
-                # Configuration မှားယွင်းပါက Default သို့ ပြန်သွားပါမည်။
                 choices = default_choices
-
         else:
-            # MODIFIED: Use the requested amounts as the final fallback default
             choices = default_choices
 
-        # If a detected amount exists and is not one of the choices, prepend it
         if detected_amount and detected_amount not in choices:
             choices = [detected_amount] + choices
 
-        # Ensure unique and sorted (optional: but useful for consistent UI)
         choices = sorted(list(set(choices)), reverse=True)
 
         kb_rows = []
         row = []
         for i, amt in enumerate(choices):
-            # FIX: Use short prefix 'rpa' (Receipt Process Approve)
             row.append(InlineKeyboardButton(f"✅ Approve {amt:,.0f} MMK", callback_data=f"rpa|{user.id}|{short_ts}|{amt}"))
-            if len(row) == 2: # Keep two buttons per row as requested
+            if len(row) == 2:
                 kb_rows.append(row)
                 row = []
         if row:
             kb_rows.append(row)
-        # FIX: Use short prefix 'rpd' (Receipt Process Deny)
         kb_rows.append([InlineKeyboardButton("❌ Deny", callback_data=f"rpd|{user.id}|{short_ts}")])
 
         await context.bot.send_message(
@@ -650,9 +677,7 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(kb_rows),
         )
     except Exception as e:
-        # Error တက်ပါက Bot မှ Admin သို့ Approval Button များပို့ရန် မအောင်မြင်ပါ။
         logger.error("Failed to send receipt buttons to admin: %s", e)
-        # The receipt forward succeeded but the buttons failed, so we give a specific error.
         await update.message.reply_text("❌ Could not forward receipt to admin. Please try again later. Please check your ADMIN_ID and Bot permissions.")
         return ConversationHandler.END
 
@@ -660,22 +685,19 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# Admin callbacks for receipts (updated to handle short_ts and new messages)
 async def admin_approve_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data  # rpa|<user_id>|<short_ts>|<amount>
+    data = query.data
     parts = data.split("|")
     if len(parts) < 4:
         await query.message.reply_text("Invalid admin action.")
         return
 
-    # short_ts_str now contains the Unix timestamp (string format)
     _, user_id_str, short_ts_str, amount_str = parts[0], parts[1], parts[2], parts[3]
     try:
         user_id = int(user_id_str)
         approved_amount = int(amount_str)
-        # Convert short_ts back to human-readable format for logging
         unix_to_dt = datetime.datetime.fromtimestamp(int(short_ts_str))
         ts_human_readable = unix_to_dt.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
@@ -683,15 +705,12 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         return
 
     config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data for authorization check
     admin_id_check = get_dynamic_admin_id(config)
     
     if query.from_user.id != admin_id_check:
         await query.message.reply_text("You are not authorized to perform this action.")
         return
 
-    
-    # ratio: mmk -> coins (user requested: 1 MMK = 0.5 coin)
     try:
         ratio = float(config.get("mmk_to_coins_ratio", "0.5"))
     except Exception:
@@ -702,7 +721,6 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
     target_user_name = user_data.get("username", user_id)
     
     try:
-        # Coin Balance ကို fetch လုပ်ရာမှာ clean လုပ်ပြီးသားဖြစ်တဲ့အတွက်၊ ဒီနေရာမှာ မှန်ကန်စွာ ပေါင်းသွားပါပြီ။
         current_coins = int(user_data.get("coin_balance", "0"))
     except ValueError:
         current_coins = 0
@@ -723,15 +741,13 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         "premium_username": "",
         "status": "APPROVED_RECEIPT",
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "notes": f"Receipt approved by admin {query.from_user.id} at {ts_human_readable}", # Use human-readable time
+        "notes": f"Receipt approved by admin {query.from_user.id} at {ts_human_readable}",
         "processed_by": str(query.from_user.id),
     }
     log_order(order)
     
-    # Get the username of the admin who processed the order
     processed_by_username = f"@{query.from_user.username}" if query.from_user.username else f"(id:{query.from_user.id})"
     
-    # NEW: Beautiful Admin Notification Message (As requested)
     beautiful_message = (
         f"✅ **APPROVED: {approved_amount:,.0f} MMK**\n\n"
         f"💰 **Added {coins_to_add:,.0f} Coins** to user.\n\n"
@@ -742,15 +758,11 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
     )
 
     try:
-        # User Notification
         await context.bot.send_message(
             chat_id=user_id,
             text=f"🎉Your balance {coins_to_add:,.0f} coin top up Successful. New balance: {new_balance:,.0f} Coins.",
         )
-        
-        # Admin Notification: Edit the inline keyboard message to show the final result
         await query.message.edit_text(beautiful_message, parse_mode="Markdown")
-        
     except Exception as e:
         logger.error("Failed to notify user after approval: %s", e)
         await query.message.edit_text(f"Approved but failed to notify user. {beautiful_message}", parse_mode="Markdown")
@@ -759,17 +771,15 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
 async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data # rpd|<user_id>|<short_ts>
+    data = query.data
     parts = data.split("|")
     if len(parts) < 3:
         await query.message.reply_text("Invalid admin action.")
         return
     
-    # short_ts_str now contains the Unix timestamp (string format)
     _, user_id_str, short_ts_str = parts
     try:
         user_id = int(user_id_str)
-        # Convert short_ts back to human-readable format for logging
         unix_to_dt = datetime.datetime.fromtimestamp(int(short_ts_str))
         ts_human_readable = unix_to_dt.strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
@@ -777,7 +787,6 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         return
 
     config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data for authorization check
     admin_id_check = get_dynamic_admin_id(config)
 
     if query.from_user.id != admin_id_check:
@@ -794,7 +803,7 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         "premium_username": "",
         "status": "DENIED_RECEIPT",
         "timestamp": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "notes": f"Receipt denied by admin {query.from_user.id} at {ts_human_readable}", # Use human-readable time
+        "notes": f"Receipt denied by admin {query.from_user.id} at {ts_human_readable}",
         "processed_by": str(query.from_user.id),
     }
     log_order(order)
@@ -810,7 +819,7 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         await query.message.edit_text("Denied but failed to notify user.")
 
 
-# ----------- Product purchase flow (NEW CANCEL BUTTONS ADDED) -----------
+# ----------- Product purchase flow -----------
 async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -822,7 +831,6 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["product_type"] = product_type
     keyboard = get_product_keyboard(product_type)
     try:
-        # Edit the message with the service menu to show product selection
         await query.message.edit_text(
             f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
             reply_markup=keyboard,
@@ -843,7 +851,6 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
     selected_key = query.data
     context.user_data["product_key"] = selected_key
     
-    # NEW: Send the initial message without the keyboard, then send the keyboard as a new message
     try:
         await query.message.edit_text(
             f"You selected *{selected_key.replace('_',' ').upper()}*.\n"
@@ -857,7 +864,6 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="Markdown",
         )
         
-    # NEW: Send the cancel keyboard to the user
     await context.bot.send_message(
         chat_id=query.from_user.id,
         text="If you want to stop the order, click '❌ Cancel Order'.",
@@ -873,7 +879,6 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
         await update.message.reply_text(
             f"Thank you. Now please send the **Telegram Username** associated with {text} (start with @ or plain username)."
         )
-        # NEW: Send the cancel keyboard again
         await context.bot.send_message(
             chat_id=update.effective_user.id,
             text="If you want to stop the order, click '❌ Cancel Order'.",
@@ -882,7 +887,6 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
         return WAITING_FOR_USERNAME
     else:
         await update.message.reply_text("❌ Invalid phone. Send digits only (8-15 digits).")
-        # Keep the cancel keyboard visible
         await context.bot.send_message(
             chat_id=update.effective_user.id,
             text="If you want to stop the order, click '❌ Cancel Order'.",
@@ -906,7 +910,6 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
     if not premium_username:
         await update.message.reply_text("❌ Invalid username format. Please try again.")
-        # Keep the cancel keyboard visible
         await context.bot.send_message(
             chat_id=update.effective_user.id,
             text="If you want to stop the order, click '❌ Cancel Order'.",
@@ -930,7 +933,6 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Product MMK price in config is invalid.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
-    # --- Calculate Coin Price needed ---
     product_type = product_key.split('_')[0]
     coin_rate_key = f"coin_rate_{product_type}"
     try:
@@ -942,9 +944,8 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
          coin_rate_mmk = 1000.0
          
     price_needed_coins = int(price_mmk_needed / coin_rate_mmk) 
-    price_needed_coins = max(1, price_needed_coins) # Ensure at least 1 coin
+    price_needed_coins = max(1, price_needed_coins)
 
-    # --- Check Balance ---
     user_data = get_user_data_from_sheet(user_id)
     try:
         user_coins = int(user_data.get("coin_balance", "0"))
@@ -970,20 +971,18 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         log_order(order)
         return ConversationHandler.END
 
-    # --- Deduct Coin ---
     new_balance = user_coins - price_needed_coins
     ok = update_user_balance(user_id, new_balance)
     if not ok:
         await update.message.reply_text("❌ Failed to deduct coins. Please contact admin.", reply_markup=MAIN_MENU_KEYBOARD)
         return ConversationHandler.END
 
-    # --- Log Order ---
     order = {
         "order_id": str(uuid.uuid4()),
         "user_id": user_id,
         "username": user_data.get("username", ""),
         "product_key": product_key,
-        "price_mmk": price_mmk_needed, # Log the MMK price for consistency
+        "price_mmk": price_mmk_needed,
         "phone": premium_phone,
         "premium_username": premium_username,
         "status": "ORDER_PLACED",
@@ -992,14 +991,12 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
     log_order(order)
     
     config = get_config_data()
-    # MODIFIED: Get ADMIN_ID from config data
     admin_id_check = get_dynamic_admin_id(config)
-
 
     await update.message.reply_text(
         f"✅ Order successful! **{price_needed_coins:,.0f} Coins** have been deducted for {product_key.replace('_',' ').upper()}.\n"
         f"New balance: {new_balance:,.0f} Coins. Please wait while service is processed.",
-        reply_markup=MAIN_MENU_KEYBOARD # Show main menu keyboard on success
+        reply_markup=MAIN_MENU_KEYBOARD
     )
     try:
         admin_msg = (
@@ -1017,7 +1014,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
     return ConversationHandler.END
 
-# NEW: Handler to cancel the product purchase conversation
+
 async def cancel_product_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "❌ Order cancelled. You have returned to the main menu.",
@@ -1026,7 +1023,6 @@ async def cancel_product_order(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-# MODIFIED: Global back to service menu (menu_back) now only returns to the main Reply Keyboard
 async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1035,28 +1031,24 @@ async def back_to_service_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     config = get_config_data()
     admin_id_check = get_dynamic_admin_id(config)
     
-    # Check if the user is the Admin from the config sheet
     is_admin = (user.id == admin_id_check)
     keyboard_to_use = ADMIN_REPLY_KEYBOARD if is_admin else MAIN_MENU_KEYBOARD
 
     welcome_text = "Welcome back to the main menu. Choose from the options below."
 
-    # Use reply_text which sends a new message with the Reply Keyboard.
     try:
-        # Delete the previous inline message if possible
         await query.message.delete()
     except Exception:
-        pass # Ignore error if delete fails (e.g., message is too old)
+        pass
 
     await context.bot.send_message(
         chat_id=query.from_user.id,
         text=welcome_text,
-        reply_markup=keyboard_to_use, # Use the determined keyboard
+        reply_markup=keyboard_to_use,
     )
-    return ConversationHandler.END # Exit any active conversation state
+    return ConversationHandler.END
 
 
-# Admin commands (ban/unban) - Updated to use config ID
 async def admin_ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = get_config_data()
     admin_id_check = get_dynamic_admin_id(config)
@@ -1104,7 +1096,7 @@ async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Failed to unban user.")
 
-# Error handler (sanitized) - Updated to use config ID
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     err_type = type(context.error).__name__ if context.error else "UnknownError"
     err_msg = str(context.error)[:1000] if context.error else "No details"
@@ -1137,20 +1129,44 @@ def main():
 
     # Command handlers
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("cancel", cancel_product_order)) # NEW: Handle /cancel command
+    application.add_handler(CommandHandler("cancel", cancel_product_order))
 
     # Admin commands
     application.add_handler(CommandHandler("ban", admin_ban_user))
     application.add_handler(CommandHandler("unban", admin_unban_user))
     
-    # Message handlers for Admin (Linked to admincommands.py)
+    # Message handlers for Admin buttons
     application.add_handler(MessageHandler(filters.Text("⚙️ Close to Selling"), admincommands.show_admin_settings))
     application.add_handler(MessageHandler(filters.Text("👾 Broadcast"), admincommands.handle_broadcast))
     application.add_handler(MessageHandler(filters.Text("👤 User Search"), admincommands.handle_user_search))
     application.add_handler(MessageHandler(filters.Text("🔄 Refresh Config"), admincommands.handle_refresh_config))
     application.add_handler(MessageHandler(filters.Text("📊 Statistics"), admincommands.handle_statistics))
 
-    # Cash Control Handler - using functions from admincommands.py
+    # Admin callback handlers
+    application.add_handler(CallbackQueryHandler(admincommands.handle_admin_callback, pattern=r"^(toggle_selling|admin_broadcast|admin_stats|admin_cash|admin_refresh)$"))
+    application.add_handler(CallbackQueryHandler(admincommands.confirm_broadcast_action, pattern=r"^(confirm_broadcast|edit_broadcast|cancel_broadcast)$"))
+
+    # Broadcast conversation handler
+    broadcast_handler = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Text("👾 Broadcast"), admincommands.handle_broadcast)
+        ],
+        states={
+            admincommands.AWAIT_BROADCAST_MESSAGE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admincommands.receive_broadcast_message)
+            ],
+            admincommands.CONFIRM_BROADCAST: [
+                CallbackQueryHandler(admincommands.confirm_broadcast_action, pattern=r"^(confirm_broadcast|edit_broadcast|cancel_broadcast)$")
+            ]
+        },
+        fallbacks=[
+            MessageHandler(filters.Text("❌ Cancel Broadcast"), admincommands.cash_control_cancel)
+        ],
+        allow_reentry=True
+    )
+    application.add_handler(broadcast_handler)
+
+    # Cash Control Handler
     cash_control_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("📝 Cash Control"), admincommands.start_cash_control)],
         states={
@@ -1166,7 +1182,7 @@ def main():
     )
     application.add_handler(cash_control_handler)
 
-    # Payment Conversation Handler (entry: Payment Method button)
+    # Payment Conversation Handler
     payment_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Text("💰 Payment Method"), handle_payment_method)],
         states={
@@ -1182,12 +1198,12 @@ def main():
                 CallbackQueryHandler(back_to_payment_menu, pattern=r"^payment_back$"),
             ],
         },
-        fallbacks=[CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$")], # Updated fallback to main menu
+        fallbacks=[CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$")],
         allow_reentry=True,
     )
     application.add_handler(payment_conv_handler)
 
-    # Product Conversation Handler (entry: Inline buttons)
+    # Product Conversation Handler
     product_purchase_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_product_purchase, pattern=r"^product_")],
         states={
@@ -1196,15 +1212,14 @@ def main():
                 CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"),
             ],
             WAITING_FOR_PHONE: [
-                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order), # NEW: Cancel button handler
+                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, validate_phone_and_ask_username)
             ],
             WAITING_FOR_USERNAME: [
-                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order), # NEW: Cancel button handler
+                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_product_order)
             ],
         },
-        # NEW: Added MessageHandler for "❌ Cancel Order" to catch button press in all states
         fallbacks=[
             CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"),
             MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order) 
@@ -1217,17 +1232,17 @@ def main():
     application.add_handler(MessageHandler(filters.Text("👤 User Info"), handle_user_info))
     application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center))
     
-    # NEW: Handler for the "Premium & Star" Reply Button
+    # Handler for "Premium & Star" Reply Button
     application.add_handler(MessageHandler(filters.Text("✨ Premium & Star"), show_product_inline_menu))
     
     # Inline callbacks: products
     application.add_handler(CallbackQueryHandler(start_product_purchase, pattern=r"^product_"))
     
-    # Admin callback handlers for approve/deny (Updated patterns)
+    # Admin callback handlers for approve/deny
     application.add_handler(CallbackQueryHandler(admin_approve_receipt_callback, pattern=r"^rpa\|"))
     application.add_handler(CallbackQueryHandler(admin_deny_receipt_callback, pattern=r"^rpd\|"))
 
-    # Back/menu callback (This is crucial for returning to the main Reply Keyboard)
+    # Back/menu callback
     application.add_handler(CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"))
 
     # Global error handler
