@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from telegram import (
     Update,
     ReplyKeyboardMarkup,
@@ -17,8 +18,10 @@ logger = logging.getLogger(__name__)
 # ==============================
 (
     AWAIT_CASH_CONTROL_ID,
-    AWAIT_CASH_CONTROL_AMOUNT
-) = range(30, 32)
+    AWAIT_CASH_CONTROL_AMOUNT,
+    AWAIT_BROADCAST_MESSAGE,
+    CONFIRM_BROADCAST
+) = range(30, 34)
 
 
 # ==============================
@@ -26,7 +29,6 @@ logger = logging.getLogger(__name__)
 # ==============================
 def admin_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        # Fix: Import from meowpremium instead of main_bot
         from meowpremium import get_config_data, get_dynamic_admin_id, ADMIN_REPLY_KEYBOARD
 
         user = update.effective_user
@@ -46,11 +48,18 @@ def admin_only(func):
 
 
 # ==============================
-# Admin Dashboard
+# Admin Dashboard - Close to Selling
 # ==============================
 @admin_only
 async def show_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from meowpremium import is_selling_open
+    
+    selling_status = "🟢 OPEN" if is_selling_open() else "🔴 CLOSED"
+    
     keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"🟢 Selling: {selling_status}", callback_data="toggle_selling")
+        ],
         [
             InlineKeyboardButton("👾 Broadcast", callback_data="admin_broadcast"),
             InlineKeyboardButton("📊 Statistics", callback_data="admin_stats")
@@ -62,9 +71,9 @@ async def show_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE
     ])
 
     await update.message.reply_text(
-        "⚙️ **ADMIN DASHBOARD**\n\n"
-        "🟢 Bot Status : Online\n"
-        "🟢 Selling    : Open\n\n"
+        f"⚙️ **ADMIN DASHBOARD**\n\n"
+        f"Bot Status: Online\n"
+        f"Selling Status: {selling_status}\n\n"
         "Select an action below 👇",
         parse_mode="Markdown",
         reply_markup=keyboard
@@ -72,15 +81,190 @@ async def show_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # ==============================
-# Broadcast
+# Toggle Selling Status
+# ==============================
+@admin_only
+async def handle_toggle_selling(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from meowpremium import set_selling_status, is_selling_open
+    
+    query = update.callback_query
+    await query.answer()
+    
+    current_status = is_selling_open()
+    new_status = not current_status
+    
+    if set_selling_status(new_status):
+        status_text = "🟢 OPEN" if new_status else "🔴 CLOSED"
+        action_text = "opened" if new_status else "closed"
+        
+        # Update the button text
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"🟢 Selling: {status_text}", callback_data="toggle_selling")
+            ],
+            [
+                InlineKeyboardButton("👾 Broadcast", callback_data="admin_broadcast"),
+                InlineKeyboardButton("📊 Statistics", callback_data="admin_stats")
+            ],
+            [
+                InlineKeyboardButton("💰 Cash Control", callback_data="admin_cash"),
+                InlineKeyboardButton("🔄 Refresh Config", callback_data="admin_refresh")
+            ]
+        ])
+        
+        await query.edit_message_text(
+            f"✅ **Selling {action_text} successfully!**\n\n"
+            f"Current Status: {status_text}\n\n"
+            f"Select another action below 👇",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    else:
+        await query.edit_message_text(
+            "❌ Failed to update selling status. Please try again.",
+            parse_mode="Markdown"
+        )
+
+
+# ==============================
+# Premium Broadcast System
 # ==============================
 @admin_only
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from meowpremium import WS_USER_DATA, ADMIN_REPLY_KEYBOARD
+    
+    if not WS_USER_DATA:
+        await update.message.reply_text(
+            "❌ User database not available. Cannot send broadcast.",
+            reply_markup=ADMIN_REPLY_KEYBOARD
+        )
+        return
+    
+    try:
+        # Get total user count
+        all_users = WS_USER_DATA.get_all_records()
+        total_users = len([u for u in all_users if u.get("banned", "FALSE").upper() != "TRUE"])
+        
+        await update.message.reply_text(
+            f"👾 **PREMIUM BROADCAST SYSTEM**\n\n"
+            f"📊 Total Active Users: {total_users}\n\n"
+            f"📝 Please send the message you want to broadcast.\n"
+            f"You can use Markdown formatting.\n\n"
+            f"⚠️ **Warning:** This will be sent to ALL users.",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardMarkup([["❌ Cancel Broadcast"]], resize_keyboard=True)
+        )
+        return AWAIT_BROADCAST_MESSAGE
+    except Exception as e:
+        logger.error(f"Error preparing broadcast: {e}")
+        await update.message.reply_text(
+            "❌ Error preparing broadcast. Please try again.",
+            reply_markup=ADMIN_REPLY_KEYBOARD
+        )
+        return ConversationHandler.END
+
+
+@admin_only
+async def receive_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.text == "❌ Cancel Broadcast":
+        from meowpremium import ADMIN_REPLY_KEYBOARD
+        await update.message.reply_text(
+            "❌ Broadcast cancelled.",
+            reply_markup=ADMIN_REPLY_KEYBOARD
+        )
+        return ConversationHandler.END
+    
+    context.user_data["broadcast_message"] = update.message.text_markdown if update.message.text_markdown else update.message.text
+    context.user_data["broadcast_entities"] = update.message.entities
+    
+    # Show preview and confirmation
+    preview_text = context.user_data["broadcast_message"][:500]
+    if len(context.user_data["broadcast_message"]) > 500:
+        preview_text += "..."
+    
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Send Now", callback_data="confirm_broadcast"),
+            InlineKeyboardButton("✏️ Edit Message", callback_data="edit_broadcast")
+        ],
+        [
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel_broadcast")
+        ]
+    ])
+    
     await update.message.reply_text(
-        "👾 **Broadcast Mode**\n\n"
-        "Send the message you want to broadcast to all users.",
-        parse_mode="Markdown"
+        f"📋 **BROADCAST PREVIEW**\n\n"
+        f"{preview_text}\n\n"
+        f"📊 **Message Length:** {len(context.user_data['broadcast_message'])} characters\n\n"
+        f"Are you sure you want to send this to ALL users?",
+        parse_mode="Markdown",
+        reply_markup=keyboard
     )
+    return CONFIRM_BROADCAST
+
+
+@admin_only
+async def confirm_broadcast_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from meowpremium import ADMIN_REPLY_KEYBOARD, send_broadcast_to_all_users
+    
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "cancel_broadcast":
+        await query.edit_message_text(
+            "❌ Broadcast cancelled.",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+    
+    elif query.data == "edit_broadcast":
+        await query.edit_message_text(
+            "✏️ Please send the updated broadcast message:",
+            parse_mode="Markdown"
+        )
+        return AWAIT_BROADCAST_MESSAGE
+    
+    elif query.data == "confirm_broadcast":
+        # Show sending status
+        await query.edit_message_text(
+            "📤 **SENDING BROADCAST...**\n\n"
+            "Please wait while messages are being sent to all users.\n"
+            "This may take a few minutes depending on the number of users.",
+            parse_mode="Markdown"
+        )
+        
+        # Send broadcast
+        successful, failed_users = await send_broadcast_to_all_users(
+            context, 
+            context.user_data["broadcast_message"]
+        )
+        
+        # Prepare result message
+        result_text = (
+            f"✅ **BROADCAST COMPLETED**\n\n"
+            f"📊 **Results:**\n"
+            f"• ✅ Successful: {successful} users\n"
+            f"• ❌ Failed: {len(failed_users)} users\n\n"
+        )
+        
+        if failed_users:
+            failed_list = ", ".join([str(uid) for uid in failed_users[:10]])
+            if len(failed_users) > 10:
+                failed_list += f" and {len(failed_users) - 10} more..."
+            result_text += f"❌ **Failed Users:** {failed_list}"
+        
+        await query.edit_message_text(
+            result_text,
+            parse_mode="Markdown"
+        )
+        
+        # Clear broadcast data
+        if "broadcast_message" in context.user_data:
+            del context.user_data["broadcast_message"]
+        if "broadcast_entities" in context.user_data:
+            del context.user_data["broadcast_entities"]
+        
+        return ConversationHandler.END
 
 
 # ==============================
@@ -100,7 +284,6 @@ async def handle_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ==============================
 @admin_only
 async def handle_refresh_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Fix: Import from meowpremium instead of main_bot
     from meowpremium import get_config_data
     get_config_data(force_refresh=True)
 
@@ -116,22 +299,64 @@ async def handle_refresh_config(update: Update, context: ContextTypes.DEFAULT_TY
 # ==============================
 @admin_only
 async def handle_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Example values (later DB connect)
-    total_users = 1250
-    total_orders = 342
-    total_revenue = "2,450,000 MMK"
-
-    await update.message.reply_text(
-        "📊 **Bot Statistics**\n\n"
-        f"👥 Users      : {total_users}\n"
-        f"📦 Orders    : {total_orders}\n"
-        f"💰 Revenue   : {total_revenue}",
-        parse_mode="Markdown"
-    )
+    from meowpremium import WS_USER_DATA, WS_ORDERS, get_config_data, is_selling_open
+    
+    try:
+        # Get user count
+        all_users = WS_USER_DATA.get_all_records() if WS_USER_DATA else []
+        total_users = len(all_users)
+        active_users = len([u for u in all_users if u.get("banned", "FALSE").upper() != "TRUE"])
+        banned_users = len([u for u in all_users if u.get("banned", "FALSE").upper() == "TRUE"])
+        
+        # Get order statistics
+        all_orders = WS_ORDERS.get_all_records() if WS_ORDERS else []
+        total_orders = len(all_orders)
+        completed_orders = len([o for o in all_orders if o.get("status", "").upper() in ["APPROVED_RECEIPT", "ORDER_PLACED"]])
+        
+        # Calculate revenue
+        total_revenue = 0
+        for order in all_orders:
+            try:
+                price_str = order.get("price_mmk", "0")
+                if price_str and str(price_str).isdigit():
+                    total_revenue += int(price_str)
+            except:
+                pass
+        
+        # Get selling status
+        selling_status = "🟢 OPEN" if is_selling_open() else "🔴 CLOSED"
+        
+        stats_text = (
+            f"📊 **BOT STATISTICS**\n\n"
+            f"🤖 **Bot Status:**\n"
+            f"• Status: Online\n"
+            f"• Selling: {selling_status}\n\n"
+            f"👥 **Users:**\n"
+            f"• Total Users: {total_users}\n"
+            f"• Active Users: {active_users}\n"
+            f"• Banned Users: {banned_users}\n\n"
+            f"📦 **Orders:**\n"
+            f"• Total Orders: {total_orders}\n"
+            f"• Completed Orders: {completed_orders}\n\n"
+            f"💰 **Revenue:**\n"
+            f"• Total Revenue: {total_revenue:,} MMK\n"
+        )
+        
+        await update.message.reply_text(
+            stats_text,
+            parse_mode="Markdown"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error generating statistics: {e}")
+        await update.message.reply_text(
+            "❌ Error generating statistics. Please try again.",
+            parse_mode="Markdown"
+        )
 
 
 # ==============================
-# Cash Control (Conversation)
+# Cash Control (Conversation) - Updated
 # ==============================
 @admin_only
 async def start_cash_control(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -166,63 +391,57 @@ async def cash_control_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 @admin_only
 async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Fix: Import from meowpremium instead of main_bot
-    from meowpremium import ADMIN_REPLY_KEYBOARD, WS_USER_DATA, find_user_row
+    from meowpremium import ADMIN_REPLY_KEYBOARD, WS_USER_DATA, find_user_row, get_user_data_from_sheet, update_user_balance
 
     amount_text = update.message.text.strip()
     target_user = context.user_data.get("cash_user")
 
-    # Try to parse amount with + or - sign
+    # Parse amount
     try:
-        # Remove any whitespace
-        amount_text = amount_text.replace(" ", "")
-        
-        # Check if it starts with + or -
-        if amount_text.startswith("+") or amount_text.startswith("-"):
-            amount = int(amount_text)
+        if amount_text.startswith("+"):
+            amount = int(amount_text[1:])
+        elif amount_text.startswith("-"):
+            amount = -int(amount_text[1:])
         else:
-            # Try to parse as integer
             amount = int(amount_text)
     except ValueError:
         await update.message.reply_text("❌ Invalid amount format. Use `+5000` or `-2000`")
         return AWAIT_CASH_CONTROL_AMOUNT
 
-    # Parse target user (could be user ID or username)
+    # Find user
     try:
-        # Check if it's a numeric user ID
         if target_user.isdigit():
             user_id = int(target_user)
-            user_row = find_user_row(user_id)
-            if user_row:
-                current_balance_cell = WS_USER_DATA.cell(user_row, 3)  # Column C = coin balance
-                current_balance = int(current_balance_cell.value or 0)
+            user_data = get_user_data_from_sheet(user_id)
+            
+            if user_data and user_data.get("user_id") != "N/A":
+                current_balance = int(user_data.get("coin_balance", 0))
                 new_balance = current_balance + amount
                 
-                # Update the balance
-                WS_USER_DATA.update_cell(user_row, 3, str(new_balance))
-                
-                # Get username for display
-                username_cell = WS_USER_DATA.cell(user_row, 2)  # Column B = username
-                username = username_cell.value or f"ID:{user_id}"
-                
-                await update.message.reply_text(
-                    f"✅ **Cash Updated Successfully**\n\n"
-                    f"👤 User: `{username}`\n"
-                    f"🆔 ID: `{user_id}`\n"
-                    f"💰 Change: `{amount:+d}` Coins\n"
-                    f"💎 Old Balance: `{current_balance}` Coins\n"
-                    f"💎 New Balance: `{new_balance}` Coins",
-                    parse_mode="Markdown",
-                    reply_markup=ADMIN_REPLY_KEYBOARD
-                )
+                if update_user_balance(user_id, new_balance):
+                    await update.message.reply_text(
+                        f"✅ **Cash Updated Successfully**\n\n"
+                        f"👤 User: `{user_data.get('username', 'N/A')}`\n"
+                        f"🆔 ID: `{user_id}`\n"
+                        f"💰 Change: `{amount:+d}` Coins\n"
+                        f"💎 Old Balance: `{current_balance}` Coins\n"
+                        f"💎 New Balance: `{new_balance}` Coins",
+                        parse_mode="Markdown",
+                        reply_markup=ADMIN_REPLY_KEYBOARD
+                    )
+                else:
+                    await update.message.reply_text(
+                        "❌ Failed to update user balance. Please try again.",
+                        parse_mode="Markdown"
+                    )
             else:
                 await update.message.reply_text(
-                    f"❌ User ID `{user_id}` not found in database.",
+                    f"❌ User ID `{user_id}` not found.",
                     parse_mode="Markdown"
                 )
                 return AWAIT_CASH_CONTROL_ID
         else:
-            # Might be a username - try to find it
+            # Try to find by username
             await update.message.reply_text(
                 "❌ Currently only User ID is supported. Please enter numeric User ID.",
                 parse_mode="Markdown"
@@ -232,7 +451,7 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"Error updating cash balance: {e}")
         await update.message.reply_text(
-            f"❌ Error updating balance: {str(e)}",
+            f"❌ Error: {str(e)}",
             parse_mode="Markdown"
         )
         return AWAIT_CASH_CONTROL_AMOUNT
@@ -242,7 +461,6 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
 
 
 async def cash_control_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Fix: Import from meowpremium instead of main_bot
     from meowpremium import ADMIN_REPLY_KEYBOARD
 
     context.user_data.clear()
@@ -251,3 +469,55 @@ async def cash_control_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=ADMIN_REPLY_KEYBOARD
     )
     return ConversationHandler.END
+
+
+# ==============================
+# Callback Query Handler
+# ==============================
+async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "toggle_selling":
+        await handle_toggle_selling(update, context)
+    elif query.data == "admin_broadcast":
+        await handle_broadcast_callback(update, context)
+    elif query.data == "admin_stats":
+        await handle_statistics_callback(update, context)
+    elif query.data == "admin_cash":
+        await start_cash_control_callback(update, context)
+    elif query.data == "admin_refresh":
+        await handle_refresh_config_callback(update, context)
+
+
+async def handle_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    from meowpremium import ADMIN_REPLY_KEYBOARD
+    await query.message.reply_text(
+        "👾 **BROADCAST**\n\n"
+        "Click the '👾 Broadcast' button in your keyboard to start broadcasting.",
+        reply_markup=ADMIN_REPLY_KEYBOARD
+    )
+
+
+async def handle_statistics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await handle_statistics(update, context)
+
+
+async def start_cash_control_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await start_cash_control(update, context)
+
+
+async def handle_refresh_config_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await handle_refresh_config(update, context)
