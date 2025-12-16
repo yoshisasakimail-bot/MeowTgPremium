@@ -1211,6 +1211,90 @@ async def cash_control_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE
     return AWAIT_CASH_CONTROL_AMOUNT
 
 # Function to apply the coin change and finish
+async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    if user.id != admin_id_check:
+        await update.message.reply_text("❌ သင်သည် Admin မဟုတ်ပါ။")
+        return
+
+    if not context.args:
+        await update.message.reply_text("💡 စာပို့ရန် format: `/broadcast သင်ပို့လိုသောစာ`", parse_mode="Markdown")
+        return
+
+    broadcast_msg = " ".join(context.args)
+    all_users = WS_USER_DATA.get_all_values()[1:] 
+    
+    success_count = 0
+    fail_count = 0
+
+    await update.message.reply_text(f"🚀 အသုံးပြုသူ {len(all_users)} ဦးထံ စာပို့နေပါပြီ...")
+
+    for row in all_users:
+        try:
+            target_id = int(row[0])
+            await context.bot.send_message(chat_id=target_id, text=f"📢 **သတင်းလွှာ**\n\n{broadcast_msg}", parse_mode="Markdown")
+            success_count += 1
+        except Exception:
+            fail_count += 1
+    
+    await update.message.reply_text(f"✅ ပို့ဆောင်ပြီးစီးပါပြီ။\nအောင်မြင်: {success_count}\nကျရှုံး: {fail_count}")
+
+async def handle_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    if user.id != admin_id_check: return
+
+    if not context.args:
+        await update.message.reply_text("🔍 ရှာရန် format: `/search <user_id>`")
+        return
+
+    search_query = context.args[0]
+    all_users = WS_USER_DATA.get_all_records()
+    found_user = None
+
+    for u in all_users:
+        if str(u['user_id']) == search_query:
+            found_user = u
+            break
+
+    if found_user:
+        msg = (
+            f"🔍 **အသုံးပြုသူ အချက်အလက်**\n"
+            f"🆔 ID: `{found_user['user_id']}`\n"
+            f"👤 Name: {found_user['username']}\n"
+            f"💰 Coins: {found_user['coin_balance']}\n"
+            f"📅 Joined: {found_user['registration_date']}"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ အသုံးပြုသူ မတွေ့ရှိပါ။")
+
+async def handle_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    config = get_config_data()
+    admin_id_check = get_dynamic_admin_id(config)
+    
+    if user.id != admin_id_check: return
+
+    users_count = len(WS_USER_DATA.get_all_values()) - 1
+    orders_count = len(WS_ORDERS.get_all_values()) - 1
+    
+    stats_msg = (
+        f"📊 **Bot စာရင်းဇယား**\n\n"
+        f"👥 စုစုပေါင်းအသုံးပြုသူ: {users_count} ဦး\n"
+        f"📦 စုစုပေါင်း Order အရေအတွက်: {orders_count} ခု"
+    )
+    await update.message.reply_text(stats_msg, parse_mode="Markdown")
+
+async def show_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ဤနေရာတွင် Admin Menu ပြသရန် သို့မဟုတ် status ပြောင်းရန် ထည့်နိုင်သည်
+    await update.message.reply_text("⚙️ Admin Settings System is active.")
+    
 async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     amount_text = update.message.text.strip()
     target_user_id = context.user_data.get('target_cash_control_id')
@@ -1333,6 +1417,11 @@ def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # Admin Commands (ဒီစာကြောင်းတွေကို add_handler တွေရှိတဲ့နေရာမှာ ထည့်ပါ)
+    application.add_handler(CommandHandler("broadcast", handle_broadcast))
+    application.add_handler(CommandHandler("search", handle_user_search))
+    application.add_handler(CommandHandler("stats", handle_statistics))
+    
     # Command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("cancel", cancel_product_order)) # NEW: Handle /cancel command
