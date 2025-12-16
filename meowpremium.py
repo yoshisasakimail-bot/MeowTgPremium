@@ -812,7 +812,7 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
             text="❌ Admin has denied your payment/receipt. Please contact support or retry the payment.",
         )
         await query.message.edit_text("❌ Denied and user notified.")
-    except Exception asas 
+    except Exception as e:
         logger.error("Failed to notify user after denial: %s", e)
         await query.message.("Denied but failed to notify user.")
 
