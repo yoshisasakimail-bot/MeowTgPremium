@@ -25,6 +25,9 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
+# Import admincommands module
+import admincommands
+
 # ----------------- Logging -----------------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -61,11 +64,7 @@ CONFIG_TTL_SECONDS = int(os.environ.get("CONFIG_TTL_SECONDS", "25"))
     SELECT_COIN_PACKAGE,
 ) = range(6)
 
-# NEW: States for Cash Control Conversation (START at 30)
-AWAIT_CASH_CONTROL_ID, AWAIT_CASH_CONTROL_AMOUNT = range(30, 32)
-# NEW: States for Broadcast Conversation
-BROADCAST_WRITE, BROADCAST_CONFIRM = range(40, 42)
-
+# Cash Control states are now imported from admincommands.py
 
 # ------------ Helper: Retry wrapper for sheet init ----------------
 def initialize_sheets(retries: int = 3, backoff: float = 2.0) -> bool:
@@ -401,13 +400,7 @@ def normalize_username(raw: str) -> str:
         return ""
     return "@" + m.group(1)
 
-def is_markdown_safe(text: str) -> bool:
-    symbols = ["*", "_", "`", "["]
-    for s in symbols:
-        if text.count(s) % 2 != 0:
-            return False
-    return True
-    
+
 def parse_amount_from_text(text: str) -> Optional[int]:
     if not text:
         return None
@@ -814,7 +807,7 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         await query.message.edit_text("❌ Denied and user notified.")
     except Exception as e:
         logger.error("Failed to notify user after denial: %s", e)
-        await query.message.("Denied but failed to notify user.")
+        await query.message.edit_text("Denied but failed to notify user.")
 
 
 # ----------- Product purchase flow (NEW CANCEL BUTTONS ADDED) -----------
@@ -1110,295 +1103,6 @@ async def admin_unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"User {target} unbanned.")
     else:
         await update.message.reply_text("Failed to unban user.")
-        
-# NEW: Placeholder functions for new Admin buttons
-async def show_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⚙️ Bot Status control functionality here.")
-
-async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
-    
-    if update.effective_user.id != admin_id_check:
-        return ConversationHandler.END
-
-    await update.message.reply_text(
-        "👾 **Broadcast Dashboard**\n\n"
-        "📨 ပို့ချင်တဲ့ စာကို ပို့ပါ (Markdown Support ရပါတယ်)\n"
-        "👁️ မပို့ခင် Preview ပြပါမယ်",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup([["❌ Cancel Broadcast"]], resize_keyboard=True)
-    )
-    return BROADCAST_WRITE
-
-async def broadcast_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    
-    if text == "❌ Cancel Broadcast":
-        return await broadcast_cancel_msg(update, context)
-
-    if not is_markdown_safe(text):
-        await update.message.reply_text(
-            "❌ **Markdown Error တွေ့ပါတယ်**\n\n"
-            "Bold (*) သို့မဟုတ် Italic (_) အဖွင့်အပိတ် မညီတာမျိုး စစ်ပေးပါ။\n\n"
-            "✏️ ပြင်ပြီး ထပ်ပို့ပါ သို့မဟုတ် Cancel နှိပ်ပါ။",
-            parse_mode="Markdown"
-        )
-        return BROADCAST_WRITE
-
-    context.user_data["broadcast_text"] = text
-    preview_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Send Now", callback_data="bc_send")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bc_cancel")]
-    ])
-
-    await update.message.reply_text(
-        "👁️ **Broadcast Preview**\n\n" + text,
-        reply_markup=preview_keyboard,
-        parse_mode="Markdown"
-    )
-    return BROADCAST_CONFIRM
-
-async def broadcast_send_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    text = context.user_data.get("broadcast_text")
-    if not text:
-        await query.message.edit_text("Data Error.")
-        return ConversationHandler.END
-
-    # User list ကို Google Sheet ရဲ့ column A ကနေ ယူခြင်း
-    users = WS_USER_DATA.col_values(1)[1:] 
-    success = failed = 0
-
-    await query.message.edit_text("📡 Broadcasting to all users... Please wait.")
-
-    for uid in users:
-        try:
-            if uid.isdigit():
-                await context.bot.send_message(chat_id=int(uid), text=text, parse_mode="Markdown")
-                success += 1
-                await asyncio.sleep(0.05) # Rate limit protection
-        except Exception:
-            failed += 1
-
-    await context.bot.send_message(
-        chat_id=query.from_user.id,
-        text=(
-            "✅ **Broadcast Completed**\n\n"
-            f"📤 Sent: {success}\n"
-            f"❌ Failed: {failed}"
-        ),
-        parse_mode="Markdown",
-        reply_markup=ADMIN_REPLY_KEYBOARD
-    )
-    context.user_data.pop("broadcast_text", None)
-    return ConversationHandler.END
-
-async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data.pop("broadcast_text", None)
-    await query.message.edit_text("❌ Broadcast cancelled.", reply_markup=ADMIN_REPLY_KEYBOARD)
-    return ConversationHandler.END
-
-async def broadcast_cancel_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop("broadcast_text", None)
-    await update.message.reply_text("❌ Broadcast cancelled.", reply_markup=ADMIN_REPLY_KEYBOARD)
-    return ConversationHandler.END
-    
-async def handle_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👤 User Search functionality here.")
-    
-async def handle_refresh_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    get_config_data(force_refresh=True)
-    await update.message.reply_text("🔄 Config data refreshed from Google Sheet.")
-    
-async def handle_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📊 Statistics functionality here.")
-
-
-# --------------- Cash Control Functions (NEW) ---------------
-
-# Function to start the Cash Control process
-async def start_cash_control(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
-    
-    if user.id != admin_id_check:
-        await update.message.reply_text("You are not authorized to use Cash Control.", reply_markup=ADMIN_REPLY_KEYBOARD)
-        return ConversationHandler.END
-
-    # Ask Admin for User ID or Username
-    await update.message.reply_text(
-        "📝 **CASH CONTROL**\n\n"
-        "Please enter the **User ID (number)** or **Username (@...)** of the user whose balance you want to modify.",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
-    )
-    
-    return AWAIT_CASH_CONTROL_ID
-
-# Function to handle cancellation
-async def cash_control_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text(
-        "📝 Cash Control cancelled.",
-        reply_markup=ADMIN_REPLY_KEYBOARD
-    )
-    return ConversationHandler.END
-
-# Function to get User ID/Username and ask for amount
-async def cash_control_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    input_identifier = update.message.text.strip()
-    
-    # 1. Resolve User ID from input (ID or Username)
-    user_id_int = None
-    target_username = None
-    
-    ws_user = WS_USER_DATA # Use global sheet variable
-
-    if input_identifier.isdigit():
-        user_id_int = int(input_identifier)
-        # Check if the user exists in the sheet
-        if find_user_row(user_id_int):
-            # Get the username for display
-            user_data = get_user_data_from_sheet(user_id_int)
-            target_username = user_data.get("username", f"ID:{user_id_int}")
-    
-    elif input_identifier.startswith('@'):
-        target_username = input_identifier
-        # Search the user_data sheet for the username
-        try:
-            cell = ws_user.find(target_username, in_column=2) # Search by username in column B
-            if cell:
-                user_id_int = int(ws_user.cell(cell.row, 1).value) # Get ID from column A
-        except Exception:
-            pass # user_id_int remains None
-    
-    else:
-         # Try to treat plain text as a username too
-         target_username = "@" + input_identifier
-         try:
-            cell = ws_user.find(target_username, in_column=2)
-            if cell:
-                user_id_int = int(ws_user.cell(cell.row, 1).value)
-         except Exception:
-            pass
-
-
-    if not user_id_int or not find_user_row(user_id_int):
-        await update.message.reply_text("❌ User not found or ID/Username is invalid. Please try again or type '⬅️ Cancel'.")
-        return AWAIT_CASH_CONTROL_ID
-         
-    # Store the target ID and Username in context
-    context.user_data['target_cash_control_id'] = user_id_int
-    context.user_data['target_cash_control_name'] = target_username
-    
-    # 2. Ask for Coin amount
-    await update.message.reply_text(
-        f"📝 **Target User Found**: {target_username} (ID `{user_id_int}`)\n\n"
-        "Please enter the Coin amount to add or subtract.\n"
-        "Use **+** for adding (e.g., `+5000`)\n"
-        "Use **-** for subtracting (e.g., `-100`)\n",
-        parse_mode="Markdown",
-        reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
-    )
-    
-    return AWAIT_CASH_CONTROL_AMOUNT
-
-# Function to apply the coin change and finish
-async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    amount_text = update.message.text.strip()
-    target_user_id = context.user_data.get('target_cash_control_id')
-    target_user_name = context.user_data.get('target_cash_control_name', f"ID:{target_user_id}")
-    admin_user = update.effective_user
-    
-    if not target_user_id:
-        await update.message.reply_text("❌ Error: Target user ID lost. Please restart Cash Control.", reply_markup=ADMIN_REPLY_KEYBOARD)
-        return ConversationHandler.END
-
-    # 1. Validate the input format (+/- and number)
-    match = re.match(r"([+\-]\d+)", amount_text)
-    if not match:
-        await update.message.reply_text("❌ Invalid format. Please use '+[number]' or '-[number]' (e.g., `+5000` or `-100`).")
-        return AWAIT_CASH_CONTROL_AMOUNT
-
-    try:
-        coin_change = int(match.group(1))
-        except ValueError:
-        await update.message.reply_text("❌ The number provided is too large or not a valid integer.")
-        return AWAIT_CASH_CONTROL_AMOUNT
-
-    # 2. Update Coin Balance in the sheet
-    ws_user = WS_USER_DATA
-    user_row = find_user_row(target_user_id)
-    
-    if user_row:
-        balance_cell_col = 3 # coin_balance is Column C
-        # Ensure we read the current balance correctly (clean up the string)
-        try:
-             old_balance = int(ws_user.cell(user_row, balance_cell_col).value or 0)
-        except ValueError:
-             old_balance = 0
-             
-        new_balance = old_balance + coin_change
-        
-        # Update the sheet
-        ws_user.update_cell(user_row, balance_cell_col, new_balance)
-        
-        # 3. Create success message for Admin
-        if coin_change > 0:
-            action_text = "Added"
-            action_emoji = "🟢"
-        elif coin_change < 0:
-            action_text = "Subtracted"
-            action_emoji = "🔴"
-        else:
-            action_text = "No Change"
-            action_emoji = "⚪"
-
-        admin_processed_by = f"@{admin_user.username}" if admin_user.username else f"ID:{admin_user.id}"
-        
-        admin_success_msg = (
-            f"✅ **Cash Control Successful!**\n\n"
-            f"{action_emoji} **Action:** {action_text} **{abs(coin_change):,.0f} Coins**\n"
-            f"**User:** {target_user_name} (ID `{target_user_id}`)\n"
-            f"**Old Balance:** {old_balance:,.0f} Coins\n"
-            f"**New Balance:** {new_balance:,.0f} Coins\n"
-            f"**Processed by:** {admin_processed_by}"
-        )
-        
-        await update.message.reply_text(admin_success_msg, parse_mode="Markdown", reply_markup=ADMIN_REPLY_KEYBOARD)
-
-        # 4. Notify User (Only if coins were added, as requested)
-        if coin_change > 0:
-            user_notification = (
-                f"🎉 **Coin Update Notification**\n\n"
-                f"**{coin_change:,.0f} Coins** have been manually added to your account by the Admin.\n\n"
-                f"Your new balance is **{new_balance:,.0f} Coins**."
-            )
-            try:
-                await context.bot.send_message(
-                    chat_id=target_user_id,
-                    text=user_notification,
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                await update.message.reply_text(f"⚠️ Warning: Could not send notification to user ID {target_user_id}. Error: {e}", reply_markup=ADMIN_REPLY_KEYBOARD)
-
-    else:
-        await update.message.reply_text("❌ Error: Target user row could not be located in the sheet during final update.", reply_markup=ADMIN_REPLY_KEYBOARD)
-
-    # Clean up context data
-    if 'target_cash_control_id' in context.user_data:
-        del context.user_data['target_cash_control_id']
-    if 'target_cash_control_name' in context.user_data:
-        del context.user_data['target_cash_control_name']
-        
-    return ConversationHandler.END
-
 
 # Error handler (sanitized) - Updated to use config ID
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1439,29 +1143,28 @@ def main():
     application.add_handler(CommandHandler("ban", admin_ban_user))
     application.add_handler(CommandHandler("unban", admin_unban_user))
     
-    # NEW: Message handlers for Admin Reply Keyboard (placeholders)
-    application.add_handler(MessageHandler(filters.Text("⚙️ Close to Selling"), show_admin_settings))
-    application.
-    # Broadcast Conversation Handler
-    broadcast_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Text("👾 Broadcast"), handle_broadcast)],
+    # Message handlers for Admin (Linked to admincommands.py)
+    application.add_handler(MessageHandler(filters.Text("⚙️ Close to Selling"), admincommands.show_admin_settings))
+    application.add_handler(MessageHandler(filters.Text("👾 Broadcast"), admincommands.handle_broadcast))
+    application.add_handler(MessageHandler(filters.Text("👤 User Search"), admincommands.handle_user_search))
+    application.add_handler(MessageHandler(filters.Text("🔄 Refresh Config"), admincommands.handle_refresh_config))
+    application.add_handler(MessageHandler(filters.Text("📊 Statistics"), admincommands.handle_statistics))
+
+    # Cash Control Handler - using functions from admincommands.py
+    cash_control_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Text("📝 Cash Control"), admincommands.start_cash_control)],
         states={
-            BROADCAST_WRITE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, broadcast_preview)
+            admincommands.AWAIT_CASH_CONTROL_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), admincommands.cash_control_get_id)
             ],
-            BROADCAST_CONFIRM: [
-                CallbackQueryHandler(broadcast_send_confirm, pattern="^bc_send$"),
-                CallbackQueryHandler(broadcast_cancel, pattern="^bc_cancel$")
-            ],
+            admincommands.AWAIT_CASH_CONTROL_AMOUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), admincommands.cash_control_apply_amount)
+            ]
         },
-        fallbacks=[MessageHandler(filters.Text("❌ Cancel Broadcast"), broadcast_cancel_msg)],
+        fallbacks=[MessageHandler(filters.Text("⬅️ Cancel"), admincommands.cash_control_cancel)],
         allow_reentry=True
     )
-    application.add_handler(broadcast_handler)
-    add_handler(MessageHandler(filters.Text("👤 User Search"), handle_user_search))
-    application.add_handler(MessageHandler(filters.Text("🔄 Refresh Config"), handle_refresh_config))
-    application.add_handler(MessageHandler(filters.Text("📊 Statistics"), handle_statistics))
-
+    application.add_handler(cash_control_handler)
 
     # Payment Conversation Handler (entry: Payment Method button)
     payment_conv_handler = ConversationHandler(
@@ -1509,23 +1212,6 @@ def main():
         allow_reentry=True,
     )
     application.add_handler(product_purchase_handler)
-
-    # NEW: Cash Control Conversation Handler
-    cash_control_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Text("📝 Cash Control"), start_cash_control)],
-        states={
-            AWAIT_CASH_CONTROL_ID: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), cash_control_get_id)
-            ],
-            AWAIT_CASH_CONTROL_AMOUNT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), cash_control_apply_amount)
-            ]
-        },
-        fallbacks=[MessageHandler(filters.Text("⬅️ Cancel"), cash_control_cancel)],
-        allow_reentry=True
-    )
-    application.add_handler(cash_control_handler)
-
 
     # Message handlers for reply keyboard
     application.add_handler(MessageHandler(filters.Text("👤 User Info"), handle_user_info))
