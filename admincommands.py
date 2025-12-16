@@ -188,7 +188,7 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
 
 
 async def cash_control_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from main_bot import ADMIN_REPLY_KEYBOARD
+    from meowpremium import ADMIN_REPLY_KEYBOARD
 
     context.user_data.clear()
     await update.message.reply_text(
