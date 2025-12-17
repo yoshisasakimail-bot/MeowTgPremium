@@ -36,11 +36,18 @@ def admin_only(func):
         admin_id = get_dynamic_admin_id(config)
 
         if user.id != admin_id:
-            await update.message.reply_text(
-                "⛔ **Access Denied**\nAdmin only command.",
-                parse_mode="Markdown",
-                reply_markup=ADMIN_REPLY_KEYBOARD
-            )
+            if update.message:
+                await update.message.reply_text(
+                    "⛔ **Access Denied**\nAdmin only command.",
+                    parse_mode="Markdown",
+                    reply_markup=ADMIN_REPLY_KEYBOARD
+                )
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(
+                    "⛔ **Access Denied**\nAdmin only command.",
+                    parse_mode="Markdown",
+                    reply_markup=ADMIN_REPLY_KEYBOARD
+                )
             return ConversationHandler.END
 
         return await func(update, context)
@@ -59,22 +66,13 @@ async def show_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton(f"🟢 Selling: {selling_status}", callback_data="toggle_selling")
-        ],
-        [
-            InlineKeyboardButton("👾 Broadcast", callback_data="admin_broadcast"),
-            InlineKeyboardButton("📊 Statistics", callback_data="admin_stats")
-        ],
-        [
-            InlineKeyboardButton("💰 Cash Control", callback_data="admin_cash"),
-            InlineKeyboardButton("🔄 Refresh Config", callback_data="admin_refresh")
         ]
     ])
 
     await update.message.reply_text(
         f"⚙️ **ADMIN DASHBOARD**\n\n"
         f"Bot Status: Online\n"
-        f"Selling Status: {selling_status}\n\n"
-        "Select an action below 👇",
+        f"Selling Status: {selling_status}",
         parse_mode="Markdown",
         reply_markup=keyboard
     )
@@ -102,21 +100,12 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(f"🟢 Selling: {status_text}", callback_data="toggle_selling")
-                ],
-                [
-                    InlineKeyboardButton("👾 Broadcast", callback_data="admin_broadcast"),
-                    InlineKeyboardButton("📊 Statistics", callback_data="admin_stats")
-                ],
-                [
-                    InlineKeyboardButton("💰 Cash Control", callback_data="admin_cash"),
-                    InlineKeyboardButton("🔄 Refresh Config", callback_data="admin_refresh")
                 ]
             ])
             
             await query.edit_message_text(
                 f"✅ **Selling {action_text} successfully!**\n\n"
-                f"Current Status: {status_text}\n\n"
-                f"Select another action below 👇",
+                f"Current Status: {status_text}",
                 parse_mode="Markdown",
                 reply_markup=keyboard
             )
@@ -145,7 +134,7 @@ async def handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # ==============================
-# Premium Broadcast System
+# Premium Broadcast System - FIXED
 # ==============================
 @admin_only
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,8 +173,9 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def receive_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from meowpremium import ADMIN_REPLY_KEYBOARD
+    
     if update.message.text == "❌ Cancel Broadcast":
-        from meowpremium import ADMIN_REPLY_KEYBOARD
         await update.message.reply_text(
             "❌ Broadcast cancelled.",
             reply_markup=ADMIN_REPLY_KEYBOARD
@@ -283,25 +273,125 @@ async def confirm_broadcast_action(update: Update, context: ContextTypes.DEFAULT
 
 
 # ==============================
-# User Search
+# User Search - FIXED
 # ==============================
 @admin_only
 async def handle_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from meowpremium import ADMIN_REPLY_KEYBOARD
+    from meowpremium import WS_USER_DATA, ADMIN_REPLY_KEYBOARD
     
+    # Prompt user for search input
     await update.message.reply_text(
         "👤 **User Search**\n\n"
-        "Send User ID or @username to search for user information.",
+        "Please send User ID or @username to search for user information.\n\n"
+        "Format:\n"
+        "• User ID: `123456789`\n"
+        "• Username: `@username`",
         parse_mode="Markdown",
-        reply_markup=ADMIN_REPLY_KEYBOARD
+        reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel Search"]], resize_keyboard=True)
     )
     
-    # Note: You can implement actual user search functionality here
-    # This is a placeholder for now
+    context.user_data["awaiting_user_search"] = True
+    return "AWAIT_USER_SEARCH_INPUT"
+
+
+@admin_only
+async def handle_user_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from meowpremium import ADMIN_REPLY_KEYBOARD, get_user_data_from_sheet
+    
+    if update.message.text == "⬅️ Cancel Search":
+        await update.message.reply_text(
+            "❌ User search cancelled.",
+            reply_markup=ADMIN_REPLY_KEYBOARD
+        )
+        context.user_data.pop("awaiting_user_search", None)
+        return ConversationHandler.END
+    
+    search_input = update.message.text.strip()
+    
+    try:
+        user_data = None
+        
+        # Check if input is numeric (User ID)
+        if search_input.isdigit():
+            user_id = int(search_input)
+            user_data = get_user_data_from_sheet(user_id)
+        
+        # Check if input is username (starts with @)
+        elif search_input.startswith("@"):
+            username = search_input[1:].lower()
+            
+            # Search through all users
+            all_users = WS_USER_DATA.get_all_records()
+            for user in all_users:
+                user_username = str(user.get("username", "")).lower().replace("@", "")
+                if user_username == username:
+                    user_data = user
+                    break
+        
+        if user_data and user_data.get("user_id") != "N/A":
+            # Format user information
+            user_id = user_data.get("user_id", "N/A")
+            username = user_data.get("username", "N/A")
+            first_name = user_data.get("first_name", "N/A")
+            last_name = user_data.get("last_name", "N/A")
+            coin_balance = user_data.get("coin_balance", 0)
+            banned = user_data.get("banned", "FALSE").upper() == "TRUE"
+            
+            status_icon = "🔴" if banned else "🟢"
+            status_text = "BANNED" if banned else "ACTIVE"
+            
+            user_info = (
+                f"👤 **User Information**\n\n"
+                f"🆔 **User ID:** `{user_id}`\n"
+                f"👤 **Username:** {username}\n"
+                f"📛 **First Name:** {first_name}\n"
+                f"📛 **Last Name:** {last_name}\n"
+                f"💰 **Coin Balance:** {coin_balance:,} Coins\n"
+                f"📊 **Status:** {status_icon} {status_text}\n"
+            )
+            
+            # Add additional info if available
+            registration_date = user_data.get("registration_date", "")
+            if registration_date:
+                user_info += f"📅 **Registered:** {registration_date}\n"
+            
+            # Add action buttons
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("💰 Adjust Balance", callback_data=f"adjust_balance_{user_id}"),
+                    InlineKeyboardButton("🚫 Ban/Unban", callback_data=f"toggle_ban_{user_id}")
+                ],
+                [
+                    InlineKeyboardButton("📨 Message User", callback_data=f"message_user_{user_id}")
+                ]
+            ])
+            
+            await update.message.reply_text(
+                user_info,
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ User `{search_input}` not found in the database.",
+                parse_mode="Markdown",
+                reply_markup=ADMIN_REPLY_KEYBOARD
+            )
+    
+    except Exception as e:
+        logger.error(f"Error searching user: {e}")
+        await update.message.reply_text(
+            f"❌ Error searching user: {str(e)}",
+            parse_mode="Markdown",
+            reply_markup=ADMIN_REPLY_KEYBOARD
+        )
+    
+    context.user_data.pop("awaiting_user_search", None)
+    return ConversationHandler.END
 
 
 # ==============================
-# Refresh Config
+# Refresh Config - FIXED
 # ==============================
 @admin_only
 async def handle_refresh_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -326,7 +416,7 @@ async def handle_refresh_config(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # ==============================
-# Statistics
+# Statistics - FIXED
 # ==============================
 @admin_only
 async def handle_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -426,15 +516,26 @@ async def handle_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logger.error(f"Error generating statistics: {e}")
-        await update.message.reply_text(
-            "❌ Error generating statistics. Please try again.",
-            parse_mode="Markdown",
-            reply_markup=ADMIN_REPLY_KEYBOARD
-        )
+        error_message = str(e)
+        if len(error_message) > 100:
+            error_message = error_message[:100] + "..."
+        
+        if update.callback_query:
+            await update.callback_query.message.reply_text(
+                f"❌ Error generating statistics: {error_message}",
+                parse_mode="Markdown",
+                reply_markup=ADMIN_REPLY_KEYBOARD
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Error generating statistics: {error_message}",
+                parse_mode="Markdown",
+                reply_markup=ADMIN_REPLY_KEYBOARD
+            )
 
 
 # ==============================
-# Cash Control (Conversation)
+# Cash Control (Conversation) - FIXED
 # ==============================
 @admin_only
 async def start_cash_control(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -452,17 +553,25 @@ async def start_cash_control(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 @admin_only
 async def cash_control_get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from meowpremium import ADMIN_REPLY_KEYBOARD
+    
     text = update.message.text.strip()
 
     if text == "⬅️ Cancel":
-        return await cash_control_cancel(update, context)
+        await update.message.reply_text(
+            "❌ Cash Control cancelled.",
+            reply_markup=ADMIN_REPLY_KEYBOARD
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
 
     context.user_data["cash_user"] = text
 
     await update.message.reply_text(
         "💵 Enter amount to add / deduct:\n"
         "Example: `+5000` or `-2000`",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
     )
     return AWAIT_CASH_CONTROL_AMOUNT
 
@@ -474,6 +583,14 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
     amount_text = update.message.text.strip()
     target_user = context.user_data.get("cash_user")
 
+    if amount_text == "⬅️ Cancel":
+        await update.message.reply_text(
+            "❌ Cash Control cancelled.",
+            reply_markup=ADMIN_REPLY_KEYBOARD
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
     # Parse amount
     try:
         if amount_text.startswith("+"):
@@ -483,7 +600,11 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
         else:
             amount = int(amount_text)
     except ValueError:
-        await update.message.reply_text("❌ Invalid amount format. Use `+5000` or `-2000`")
+        await update.message.reply_text(
+            "❌ Invalid amount format. Use `+5000` or `-2000`",
+            parse_mode="Markdown",
+            reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
+        )
         return AWAIT_CASH_CONTROL_AMOUNT
 
     # Find user
@@ -521,49 +642,38 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
                         f"👤 User: `{user_data.get('username', 'N/A')}`\n"
                         f"🆔 ID: `{user_id}`\n"
                         f"💰 Change: `{amount:+d}` Coins\n"
-                        f"💎 Old Balance: `{current_balance}` Coins\n"
-                        f"💎 New Balance: `{new_balance}` Coins",
+                        f"💎 Old Balance: `{current_balance:,}` Coins\n"
+                        f"💎 New Balance: `{new_balance:,}` Coins",
                         parse_mode="Markdown",
                         reply_markup=ADMIN_REPLY_KEYBOARD
                     )
                 else:
                     await update.message.reply_text(
                         "❌ Failed to update user balance. Please try again.",
-                        parse_mode="Markdown"
+                        parse_mode="Markdown",
+                        reply_markup=ADMIN_REPLY_KEYBOARD
                     )
             else:
                 await update.message.reply_text(
                     f"❌ User ID `{user_id}` not found.",
-                    parse_mode="Markdown"
+                    parse_mode="Markdown",
+                    reply_markup=ADMIN_REPLY_KEYBOARD
                 )
-                return AWAIT_CASH_CONTROL_ID
         else:
             # Try to find by username
             await update.message.reply_text(
                 "❌ Currently only User ID is supported. Please enter numeric User ID.",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=ADMIN_REPLY_KEYBOARD
             )
-            return AWAIT_CASH_CONTROL_ID
             
     except Exception as e:
         logger.error(f"Error updating cash balance: {e}")
         await update.message.reply_text(
-            f"❌ Error: {str(e)}",
-            parse_mode="Markdown"
+            f"❌ Error: {str(e)[:100]}",
+            parse_mode="Markdown",
+            reply_markup=ADMIN_REPLY_KEYBOARD
         )
-        return AWAIT_CASH_CONTROL_AMOUNT
 
     context.user_data.clear()
-    return ConversationHandler.END
-
-
-@admin_only
-async def cash_control_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from meowpremium import ADMIN_REPLY_KEYBOARD
-
-    context.user_data.clear()
-    await update.message.reply_text(
-        "❌ Cash Control cancelled.",
-        reply_markup=ADMIN_REPLY_KEYBOARD
-    )
     return ConversationHandler.END
