@@ -676,4 +676,16 @@ async def cash_control_apply_amount(update: Update, context: ContextTypes.DEFAUL
         )
 
     context.user_data.clear()
+    # ==============================
+# Cash Control Cancel Function
+# ==============================
+@admin_only
+async def cash_control_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from meowpremium import ADMIN_REPLY_KEYBOARD
+
+    context.user_data.clear()
+    await update.message.reply_text(
+        "❌ Cash Control cancelled.",
+        reply_markup=ADMIN_REPLY_KEYBOARD
+    )
     return ConversationHandler.END
