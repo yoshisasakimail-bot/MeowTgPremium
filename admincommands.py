@@ -4,6 +4,7 @@ import re
 import uuid
 import csv
 import io
+import asyncio
 from typing import Dict, List, Optional, Tuple
 from telegram import (
     Update,
@@ -75,6 +76,7 @@ class AdminCommands:
         
         # Bot Status Handler
         application.add_handler(MessageHandler(filters.Text("⚙️ Bot Status"), self.handle_bot_status))
+        application.add_handler(CallbackQueryHandler(self.bot_status_callback, pattern=r"^bot_"))
         
         # Cash Control Conversation Handler
         cash_control_handler = ConversationHandler(
@@ -137,7 +139,16 @@ class AdminCommands:
         application.add_handler(CallbackQueryHandler(self.update_order_status_callback, pattern=r"^order_update_"))
         
         # Config edit callbacks
-        application.add_handler(CallbackQueryHandler(self.edit_config_callback, pattern=r"^config_edit_"))
+        application.add_handler(CallbackQueryHandler(self.edit_config_callback, pattern=r"^config_"))
+        
+        # Statistics refresh callback
+        application.add_handler(CallbackQueryHandler(self.stats_refresh_callback, pattern=r"^stats_"))
+        
+        # System health refresh callback
+        application.add_handler(CallbackQueryHandler(self.health_refresh_callback, pattern=r"^health_"))
+        
+        # Notifications callback
+        application.add_handler(CallbackQueryHandler(self.notifications_callback, pattern=r"^notify_"))
     
     # =============== BROADCAST FEATURE ===============
     async def start_broadcast(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -697,6 +708,10 @@ class AdminCommands:
             return
         
         data = query.data
+        if data == "orders_refresh":
+            await self.handle_order_management(update, context)
+            return
+        
         parts = data.split('_')
         
         if len(parts) < 4:
@@ -837,6 +852,13 @@ class AdminCommands:
             logger.error(f"Error generating statistics: {e}")
             await update.message.reply_text("❌ Error generating statistics.")
     
+    async def stats_refresh_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "stats_refresh":
+            await self.handle_statistics(update, context)
+    
     # =============== CONFIGURATION FEATURE ===============
     async def handle_configuration(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -897,44 +919,12 @@ class AdminCommands:
             return
         
         data = query.data
-        parts = data.split('_')
         
-        if len(parts) < 3:
-            await query.message.reply_text("Invalid action.")
+        if data == "config_refresh":
+            await self.handle_configuration(update, context)
             return
         
-        action = parts[1]
-        
-        if action == "search":
-            await query.message.reply_text(
-                "Enter config key to search:",
-                reply_markup=ReplyKeyboardMarkup([["⬅️ Cancel"]], resize_keyboard=True)
-            )
-            return AWAIT_CONFIG_EDIT
-        
-        elif action == "edit":
-            config = self.get_config_data()
-            
-            # Create keyboard with config keys
-            keyboard_buttons = []
-            row = []
-            keys = sorted(config.keys())
-            
-            for i, key in enumerate(keys):
-                row.append(InlineKeyboardButton(key[:15], callback_data=f"config_select_{key}"))
-                if len(row) == 2:
-                    keyboard_buttons.append(row)
-                    row = []
-            
-            if row:
-                keyboard_buttons.append(row)
-            
-            keyboard_buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="config_back")])
-            
-            await query.message.edit_text(
-                "Select config key to edit:",
-                reply_markup=InlineKeyboardMarkup(keyboard_buttons)
-            )
+        await query.message.edit_text("Config edit feature will be implemented in the next version.")
     
     # =============== SYSTEM HEALTH FEATURE ===============
     async def handle_system_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1001,7 +991,7 @@ class AdminCommands:
                 health_score -= 10
                 issues.append("High pending orders")
             
-            if recent_errors > 10:
+            if isinstance(recent_errors, int) and recent_errors > 10:
                 health_score -= 20
                 issues.append("Multiple recent errors")
             
@@ -1039,6 +1029,13 @@ class AdminCommands:
         except Exception as e:
             logger.error(f"Error checking system health: {e}")
             await update.message.reply_text("❌ Error checking system health.")
+    
+    async def health_refresh_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "health_refresh":
+            await self.handle_system_health(update, context)
     
     # =============== DATA EXPORT FEATURE ===============
     async def start_data_export(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1125,7 +1122,10 @@ class AdminCommands:
             output = io.StringIO()
             writer = csv.DictWriter(output, fieldnames=fieldnames)
             writer.writeheader()
-            writer.writerows(data)
+            
+            # Write data
+            for row in data:
+                writer.writerow(row)
             
             # Send file
             await context.bot.send_document(
@@ -1243,6 +1243,16 @@ class AdminCommands:
             logger.error(f"Error showing notifications: {e}")
             await update.message.reply_text("❌ Error loading notifications.")
     
+    async def notifications_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "notify_refresh":
+            await self.handle_notifications(update, context)
+            return
+        
+        await query.message.edit_text("Notification settings will be implemented in the next version.")
+    
     # =============== HELPER METHODS ===============
     def get_admin_keyboard(self):
         """Get admin reply keyboard"""
@@ -1258,4 +1268,4 @@ class AdminCommands:
             ],
             resize_keyboard=True,
             one_time_keyboard=False
-        )
+            )
