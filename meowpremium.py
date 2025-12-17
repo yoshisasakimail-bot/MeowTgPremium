@@ -37,6 +37,7 @@ from admincommands import (
     AWAIT_USER_SEARCH,
     AWAIT_ORDER_STATUS_UPDATE,
     AWAIT_CONFIG_EDIT,
+    AWAIT_DATA_EXPORT_TYPE,
 )
 
 # ----------------- Logging -----------------
@@ -338,7 +339,10 @@ def get_all_users() -> List[Dict]:
                     'user_id': str(record.get('user_id', '')),
                     'username': record.get('username', 'N/A'),
                     'coin_balance': record.get('coin_balance', '0'),
-                    'banned': record.get('banned', 'FALSE')
+                    'banned': record.get('banned', 'FALSE'),
+                    'last_active': record.get('last_active', ''),
+                    'registration_date': record.get('registration_date', ''),
+                    'total_purchase': record.get('total_purchase', '0')
                 })
         return users
     except Exception as e:
@@ -577,13 +581,6 @@ def get_bot_status() -> bool:
 
 # ------------ Handlers ----------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Check bot status
-    if not get_bot_status():
-        await update.message.reply_text(
-            "⏸️ Bot is currently closed for maintenance. Please try again later."
-        )
-        return
-    
     user = update.effective_user
     register_user_if_not_exists(user.id, user.full_name)
     
@@ -594,6 +591,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = get_config_data()
     is_admin = is_multi_admin(user.id)
 
+    # Admin ဆိုရင် bot status ကို စစ်မနေတော့ဘူး
+    if not is_admin and not get_bot_status():
+        await update.message.reply_text(
+            "⏸️ Bot is currently closed for maintenance. Please try again later."
+        )
+        return
+    
     welcome_text = (
         f"Hello, 👑**{user.full_name}**\n\n"
         f"🧸Welcome — Meow Telegram Bot 🫶\n"
@@ -605,11 +609,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_product_inline_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not get_bot_status():
+    user = update.effective_user
+    config = get_config_data()
+    is_admin = is_multi_admin(user.id)
+    
+    # Admin မဟုတ်ရင် bot status စစ်ပါ
+    if not is_admin and not get_bot_status():
         await update.message.reply_text("⏸️ Bot is currently closed for maintenance.")
         return
     
-    user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
         return
@@ -619,11 +627,15 @@ async def show_product_inline_menu(update: Update, context: ContextTypes.DEFAULT
 
 
 async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not get_bot_status():
+    user = update.effective_user
+    config = get_config_data()
+    is_admin = is_multi_admin(user.id)
+    
+    # Admin မဟုတ်ရင် bot status စစ်ပါ
+    if not is_admin and not get_bot_status():
         await update.message.reply_text("⏸️ Bot is currently closed for maintenance.")
         return
     
-    user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
         return
@@ -644,7 +656,12 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not get_bot_status():
+    user = update.effective_user
+    config = get_config_data()
+    is_admin = is_multi_admin(user.id)
+    
+    # Admin မဟုတ်ရင် bot status စစ်ပါ
+    if not is_admin and not get_bot_status():
         await update.message.reply_text("⏸️ Bot is currently closed for maintenance.")
         return
     
@@ -664,11 +681,15 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ----------- Payment Flow -----------
 async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not get_bot_status():
+    user = update.effective_user
+    config = get_config_data()
+    is_admin = is_multi_admin(user.id)
+    
+    # Admin မဟုတ်ရင် bot status စစ်ပါ
+    if not is_admin and not get_bot_status():
         await update.message.reply_text("⏸️ Bot is currently closed for maintenance.")
         return ConversationHandler.END
     
-    user = update.effective_user
     if is_user_banned(user.id):
         await update.message.reply_text("❌ သင့်အကောင့်အား ပိတ်ထားပါသည်။")
         return ConversationHandler.END
@@ -831,7 +852,6 @@ async def admin_approve_receipt_callback(update: Update, context: ContextTypes.D
         return
 
     config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
     
     if not is_multi_admin(query.from_user.id):
         await query.message.reply_text("You are not authorized to perform this action.")
@@ -922,7 +942,6 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
         return
 
     config = get_config_data()
-    admin_id_check = get_dynamic_admin_id(config)
 
     if not is_multi_admin(query.from_user.id):
         await query.message.reply_text("You are not authorized to perform this action.")
@@ -965,12 +984,18 @@ async def admin_deny_receipt_callback(update: Update, context: ContextTypes.DEFA
 
 # ----------- Product purchase flow -----------
 async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not get_bot_status():
-        await update.message.reply_text("⏸️ Bot is currently closed for maintenance.")
-        return ConversationHandler.END
-    
     query = update.callback_query
     await query.answer()
+    
+    user = query.from_user
+    config = get_config_data()
+    is_admin = is_multi_admin(user.id)
+    
+    # Admin မဟုတ်ရင် bot status စစ်ပါ
+    if not is_admin and not get_bot_status():
+        await query.message.reply_text("⏸️ Bot is currently closed for maintenance.")
+        return ConversationHandler.END
+    
     parts = query.data.split("_")
     if len(parts) < 2:
         await query.message.reply_text("Invalid product selection.")
@@ -979,6 +1004,7 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     product_type = parts[1]
     context.user_data["product_type"] = product_type
     keyboard = get_product_keyboard(product_type)
+    
     try:
         await query.message.edit_text(
             f"Please select the duration/amount for the **Telegram {product_type.upper()}** purchase:",
@@ -1301,6 +1327,10 @@ def main():
     if not BOT_TOKEN:
         logger.error("Missing BOT_TOKEN environment variable.")
         return
+
+    # Set bot to active by default on startup
+    set_bot_status(True)
+    logger.info("✅ Bot started in ACTIVE mode by default")
 
     application = Application.builder().token(BOT_TOKEN).build()
 
