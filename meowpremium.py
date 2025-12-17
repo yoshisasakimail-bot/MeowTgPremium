@@ -38,6 +38,8 @@ from admincommands import (
     AWAIT_ORDER_STATUS_UPDATE,
     AWAIT_CONFIG_EDIT,
     AWAIT_DATA_EXPORT_TYPE,
+    AWAIT_BROADCAST_TYPE,
+    AWAIT_BROADCAST_TARGET_USER,
 )
 
 # ----------------- Logging -----------------
@@ -510,9 +512,7 @@ ADMIN_REPLY_KEYBOARD = ReplyKeyboardMarkup(
         [KeyboardButton("❓ Help Center"), KeyboardButton("✨ Premium & Star")],
         [KeyboardButton("👾 Broadcast"), KeyboardButton("⚙️ Bot Status")],
         [KeyboardButton("📝 Cash Control"), KeyboardButton("👤 User Search")],
-        [KeyboardButton("📦 Order Management"), KeyboardButton("📊 Statistics")],
-        [KeyboardButton("⚙️ Configuration"), KeyboardButton("📈 System Health")],
-        [KeyboardButton("📤 Data Export"), KeyboardButton("🔔 Notifications")]
+        [KeyboardButton("📈 System Health"), KeyboardButton("📤 Data Export")]
     ],
     resize_keyboard=True,
     one_time_keyboard=False
@@ -651,7 +651,7 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔸 **Total Purchase:** {data.get('total_purchase', '0')} MMK\n"
         f"🔸 **Banned:** {data.get('banned')}\n"
     )
-    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]])
+    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Menu", callback_data="menu_back")]])
     await update.message.reply_text(info_text, reply_markup=back_keyboard, parse_mode="Markdown")
 
 
@@ -672,7 +672,7 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"For assistance, contact the administrator:\nAdmin Contact: **{admin_username}**\n\n"
         "We will respond as soon as possible."
     )
-    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]])
+    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Menu", callback_data="menu_back")]])
     if update.callback_query:
         await update.callback_query.message.reply_text(help_text, reply_markup=back_keyboard, parse_mode="Markdown")
     else:
@@ -740,7 +740,7 @@ async def start_payment_conv(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if pkg:
         pkg_text = f"\nPackage: {pkg['coins']} Coins — {pkg['mmk']} MMK\n"
     
-    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Payment Menu", callback_data="payment_back")]])
+    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Back to Payment Menu", callback_data="payment_back")]])
     transfer_text = (
         f"✅ Please transfer via **{payment_method.upper()}** as follows:{pkg_text}\n"
         f"Name: **{admin_name}**\n"
