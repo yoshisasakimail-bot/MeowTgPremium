@@ -31,9 +31,7 @@ AWAIT_BROADCAST_CONFIRM, AWAIT_BROADCAST_MESSAGE = range(32, 34)
 AWAIT_BROADCAST_TYPE = 35
 AWAIT_BROADCAST_TARGET_USER = 36
 AWAIT_USER_SEARCH = 37
-AWAIT_ORDER_STATUS_UPDATE = 38
-AWAIT_CONFIG_EDIT = 39
-AWAIT_DATA_EXPORT_TYPE = 40
+AWAIT_DATA_EXPORT_TYPE = 38
 
 class AdminCommands:
     def __init__(self, ws_user_data, ws_config, ws_orders, ws_admin_logs, 
@@ -67,7 +65,7 @@ class AdminCommands:
                     CallbackQueryHandler(self.handle_broadcast_type, pattern=r"^broadcast_type_")
                 ],
                 AWAIT_BROADCAST_TARGET_USER: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("⬅️ Cancel"), self.handle_broadcast_target_user)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("🚫 Cancel"), self.handle_broadcast_target_user)
                 ],
                 AWAIT_BROADCAST_MESSAGE: [
                     MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, self.receive_broadcast_message)
@@ -78,7 +76,7 @@ class AdminCommands:
                 ]
             },
             fallbacks=[
-                MessageHandler(filters.Text("⬅️ Cancel"), self.cancel_broadcast_action),
+                MessageHandler(filters.Text("🚫 Cancel"), self.cancel_broadcast_action),
                 CallbackQueryHandler(self.cancel_broadcast_action_callback, pattern=r"^broadcast_cancel$")
             ],
             allow_reentry=True
@@ -134,6 +132,26 @@ class AdminCommands:
             allow_reentry=True
         )
         application.add_handler(data_export_handler)
+        
+        # Admin back button handler
+        application.add_handler(CallbackQueryHandler(self.admin_back_callback, pattern=r"^admin_back$"))
+    
+    # =============== ADMIN BACK CALLBACK ===============
+    async def admin_back_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle admin back button"""
+        query = update.callback_query
+        await query.answer()
+        
+        try:
+            await query.message.delete()
+        except:
+            pass
+        
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="🏠 Returning to admin menu...",
+            reply_markup=self.get_admin_keyboard()
+        )
     
     # =============== ENHANCED BROADCAST FEATURE WITH MEDIA SUPPORT ===============
     async def start_broadcast_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -483,7 +501,7 @@ class AdminCommands:
         
         return ConversationHandler.END
     
-    # =============== BOT STATUS FEATURE ===============
+    # =============== FIXED BOT STATUS FEATURE ===============
     async def handle_bot_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if not self.is_multi_admin(user.id):
@@ -529,8 +547,10 @@ class AdminCommands:
             status = "🔴 DEACTIVATED"
             action_text = "deactivated"
         elif action == "bot_refresh":
+            # Refresh လုပ်တဲ့အခါ message ကို ဖျက်ပြီး အသစ်ပြန်ပို့မယ်
             current_status = self.get_bot_status()
-            status = "🟢 ACTIVE" if current_status else "🔴 INACTIVE"
+            status_text = "🟢 ACTIVE" if current_status else "🔴 INACTIVE"
+            
             keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("🟢 Activate Bot", callback_data="bot_activate"),
@@ -538,22 +558,29 @@ class AdminCommands:
                 ],
                 [InlineKeyboardButton("🔄 Refresh Status", callback_data="bot_refresh")]
             ])
-            await query.message.edit_text(
-                f"🤖 **BOT STATUS CONTROL**\n\n"
-                f"Current Status: {status}\n\n"
-                f"Choose an action:",
-                reply_markup=keyboard,
-                parse_mode="Markdown"
+            
+            # Message တစ်ခုလုံးကို အသစ်ပြန်ပို့မယ်
+            await query.message.delete()
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=f"🤖 **BOT STATUS CONTROL**\n\nCurrent Status: {status_text}\n\nChoose an action:",
+                parse_mode="Markdown",
+                reply_markup=keyboard
             )
             return
         
-        # Log admin action
-        self.log_admin_action(
-            admin_id=user.id,
-            admin_username=user.username or str(user.id),
-            action=f"BOT_{action_text.upper()}",
-            details=f"Bot {action_text}"
-        )
+        # Log admin action for activate/deactivate
+        if action in ["bot_activate", "bot_deactivate"]:
+            self.log_admin_action(
+                admin_id=user.id,
+                admin_username=user.username or str(user.id),
+                action=f"BOT_{action_text.upper()}",
+                details=f"Bot {action_text}"
+            )
+        
+        # Activate/Deactivate လုပ်တဲ့အခါမှာလည်း message အသစ်ပို့မယ်
+        current_status = self.get_bot_status()
+        status_text = "🟢 ACTIVE" if current_status else "🔴 INACTIVE"
         
         keyboard = InlineKeyboardMarkup([
             [
@@ -563,12 +590,13 @@ class AdminCommands:
             [InlineKeyboardButton("🔄 Refresh Status", callback_data="bot_refresh")]
         ])
         
-        await query.message.edit_text(
-            f"✅ Bot {action_text}!\n\n"
-            f"Current Status: {status}\n\n"
-            f"Choose an action:",
-            reply_markup=keyboard,
-            parse_mode="Markdown"
+        # Message အသစ်ပို့မယ်
+        await query.message.delete()
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=f"✅ Bot {action_text}!\n\nCurrent Status: {status_text}\n\nChoose an action:",
+            parse_mode="Markdown",
+            reply_markup=keyboard
         )
     
     # =============== IMPROVED CASH CONTROL FEATURE ===============
@@ -842,7 +870,7 @@ class AdminCommands:
                         InlineKeyboardButton("📋 Orders", callback_data=f"user_orders_{user['user_id']}"),
                         InlineKeyboardButton("📝 Edit", callback_data=f"user_edit_{user['user_id']}")
                     ],
-                    [InlineKeyboardButton("🏠 Back to Menu", callback_data="admin_back")]
+                    [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
                 ])
                 
                 await update.message.reply_text(
@@ -860,7 +888,7 @@ class AdminCommands:
                     results_text += f"\n... and {len(found_users) - 10} more users."
                 
                 keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🏠 Back to Menu", callback_data="admin_back")]
+                    [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
                 ])
                 
                 await update.message.reply_text(
@@ -901,7 +929,7 @@ class AdminCommands:
         )
         return ConversationHandler.END
     
-    # =============== SYSTEM HEALTH FEATURE ===============
+    # =============== FIXED SYSTEM HEALTH FEATURE ===============
     async def handle_system_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if not self.is_multi_admin(user.id):
@@ -992,7 +1020,7 @@ class AdminCommands:
             
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Refresh", callback_data="health_refresh")],
-                [InlineKeyboardButton("🏠 Back to Menu", callback_data="admin_back")]
+                [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
             ])
             
             await update.message.reply_text(
@@ -1010,10 +1038,30 @@ class AdminCommands:
         await query.answer()
         
         if query.data == "health_refresh":
-            await self.handle_system_health(update, context)
+            # Message ကို ဖျက်ပြီး အသစ်ပြန်ပို့မယ်
+            try:
+                await query.message.delete()
+            except:
+                pass
+            
+            # Create a new Update object with the message
+            new_update = Update(
+                update_id=update.update_id,
+                message=query.message
+            )
+            await self.handle_system_health(new_update, context)
         elif query.data == "admin_back":
-            await query.message.edit_text("Returning to admin menu...")
-            # The main bot will handle showing the admin menu
+            # Back button အတွက် message ကို ဖျက်ပြီး admin menu ပြန်ပြမယ်
+            try:
+                await query.message.delete()
+            except:
+                pass
+            
+            await context.bot.send_message(
+                chat_id=query.from_user.id,
+                text="🏠 Returning to admin menu...",
+                reply_markup=self.get_admin_keyboard()
+            )
     
     # =============== DATA EXPORT FEATURE ===============
     async def start_data_export(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1098,7 +1146,7 @@ class AdminCommands:
             )
             
             keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏠 Back to Menu", callback_data="admin_back")]
+                [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
             ])
             
             await query.message.edit_text(f"✅ {export_type.title()} exported successfully!", reply_markup=keyboard)
@@ -1141,4 +1189,4 @@ class AdminCommands:
             ],
             resize_keyboard=True,
             one_time_keyboard=False
-            )
+    )
