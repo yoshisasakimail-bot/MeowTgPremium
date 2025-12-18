@@ -35,8 +35,6 @@ from admincommands import (
     AWAIT_BROADCAST_CONFIRM,
     AWAIT_BROADCAST_MESSAGE,
     AWAIT_USER_SEARCH,
-    AWAIT_ORDER_STATUS_UPDATE,
-    AWAIT_CONFIG_EDIT,
     AWAIT_DATA_EXPORT_TYPE,
     AWAIT_BROADCAST_TYPE,
     AWAIT_BROADCAST_TARGET_USER,
@@ -468,7 +466,7 @@ def get_product_keyboard(product_type: str) -> InlineKeyboardMarkup:
             button_text = f"{icon} {button_name} ({price_coin} Coins)" 
             keyboard_buttons.append([InlineKeyboardButton(button_text, callback_data=f"{key}")])
 
-    keyboard_buttons.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]) 
+    keyboard_buttons.append([InlineKeyboardButton("↩️ Back to Menu", callback_data="menu_back")]) 
     return InlineKeyboardMarkup(keyboard_buttons)
 
 
@@ -495,7 +493,7 @@ def get_coin_package_keyboard() -> InlineKeyboardMarkup:
     for coins, mmk in coin_items:
         txt = f"🟡 {coins} Coins — {mmk} MMK"
         buttons.append([InlineKeyboardButton(txt, callback_data=f"buycoin_{coins}_{mmk}")])
-    buttons.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")])
+    buttons.append([InlineKeyboardButton("↩️ Back to Menu", callback_data="menu_back")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -523,13 +521,13 @@ PRODUCT_SELECTION_INLINE_KEYBOARD = InlineKeyboardMarkup(
     [
         [InlineKeyboardButton("⭐ Telegram Star", callback_data="product_star")],
         [InlineKeyboardButton("❄️ Telegram Premium", callback_data="product_premium")],
-        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu_back")]
+        [InlineKeyboardButton("↩️ Back to Menu", callback_data="menu_back")]
     ]
 )
 
 
 CANCEL_KEYBOARD = ReplyKeyboardMarkup(
-    [[KeyboardButton("❌ Cancel Order")]],
+    [[KeyboardButton("🚫 Cancel Order")]],
     resize_keyboard=True,
     one_time_keyboard=True
 )
@@ -1041,7 +1039,7 @@ async def select_product_price(update: Update, context: ContextTypes.DEFAULT_TYP
         
     await context.bot.send_message(
         chat_id=query.from_user.id,
-        text="If you want to stop the order, click '❌ Cancel Order'.",
+        text="If you want to stop the order, click '🚫 Cancel Order'.",
         reply_markup=CANCEL_KEYBOARD
     )
     return WAITING_FOR_PHONE
@@ -1056,7 +1054,7 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
         )
         await context.bot.send_message(
             chat_id=update.effective_user.id,
-            text="If you want to stop the order, click '❌ Cancel Order'.",
+            text="If you want to stop the order, click '🚫 Cancel Order'.",
             reply_markup=CANCEL_KEYBOARD
         )
         return WAITING_FOR_USERNAME
@@ -1064,7 +1062,7 @@ async def validate_phone_and_ask_username(update: Update, context: ContextTypes.
         await update.message.reply_text("❌ Invalid phone. Send digits only (8-15 digits).")
         await context.bot.send_message(
             chat_id=update.effective_user.id,
-            text="If you want to stop the order, click '❌ Cancel Order'.",
+            text="If you want to stop the order, click '🚫 Cancel Order'.",
             reply_markup=CANCEL_KEYBOARD
         )
         return WAITING_FOR_PHONE
@@ -1087,7 +1085,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Invalid username format. Please try again.")
         await context.bot.send_message(
             chat_id=update.effective_user.id,
-            text="If you want to stop the order, click '❌ Cancel Order'.",
+            text="If you want to stop the order, click '🚫 Cancel Order'.",
             reply_markup=CANCEL_KEYBOARD
         )
         return WAITING_FOR_USERNAME
@@ -1193,7 +1191,7 @@ async def finalize_product_order(update: Update, context: ContextTypes.DEFAULT_T
 
 async def cancel_product_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "❌ Order cancelled. You have returned to the main menu.",
+        "🚫 Order cancelled. You have returned to the main menu.",
         reply_markup=MAIN_MENU_KEYBOARD
     )
     return ConversationHandler.END
@@ -1391,17 +1389,17 @@ def main():
                 CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"),
             ],
             WAITING_FOR_PHONE: [
-                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order),
+                MessageHandler(filters.Text("🚫 Cancel Order"), cancel_product_order),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, validate_phone_and_ask_username)
             ],
             WAITING_FOR_USERNAME: [
-                MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order),
+                MessageHandler(filters.Text("🚫 Cancel Order"), cancel_product_order),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, finalize_product_order)
             ],
         },
         fallbacks=[
             CallbackQueryHandler(back_to_service_menu, pattern=r"^menu_back$"),
-            MessageHandler(filters.Text("❌ Cancel Order"), cancel_product_order) 
+            MessageHandler(filters.Text("🚫 Cancel Order"), cancel_product_order) 
         ],
         allow_reentry=True,
     )
