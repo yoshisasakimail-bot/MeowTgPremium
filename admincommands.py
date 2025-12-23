@@ -166,7 +166,7 @@ class AdminCommands:
             reply_markup=self.get_admin_keyboard()
         )
     
-    # =============== ENHANCED BROADCAST FEATURE WITH MEDIA SUPPORT ===============
+    # =============== ENHANCED BROADCAST FEATURE ===============
     async def start_broadcast_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user = update.effective_user
         if not self.is_multi_admin(user.id):
@@ -225,38 +225,34 @@ class AdminCommands:
         username = None
         
         if target_input.isdigit():
-            # Input is a user ID
             user_id = int(target_input)
-            # Check if user exists
             try:
                 cell = self.ws_user_data.find(str(user_id), in_column=1)
                 if cell:
                     username_cell = self.ws_user_data.cell(cell.row, 2).value
                     username = username_cell if username_cell else f"ID:{user_id}"
                 else:
-                    await update.message.reply_text("❌ User not found. Please check the User ID and try again.")
+                    await update.message.reply_text("❌ User not found.")
                     return AWAIT_BROADCAST_TARGET_USER
             except:
-                await update.message.reply_text("❌ User not found. Please check the User ID and try again.")
+                await update.message.reply_text("❌ User not found.")
                 return AWAIT_BROADCAST_TARGET_USER
         elif target_input.startswith('@'):
-            # Input is a username
             username = target_input
             try:
                 cell = self.ws_user_data.find(username, in_column=2)
                 if cell:
                     user_id = int(self.ws_user_data.cell(cell.row, 1).value)
                 else:
-                    await update.message.reply_text("❌ User not found. Please check the username and try again.")
+                    await update.message.reply_text("❌ User not found.")
                     return AWAIT_BROADCAST_TARGET_USER
             except:
-                await update.message.reply_text("❌ User not found. Please check the username and try again.")
+                await update.message.reply_text("❌ User not found.")
                 return AWAIT_BROADCAST_TARGET_USER
         else:
             await update.message.reply_text("❌ Invalid input. Please enter a valid User ID or @username.")
             return AWAIT_BROADCAST_TARGET_USER
         
-        # Store target user info
         context.user_data['broadcast_target_user_id'] = user_id
         context.user_data['broadcast_target_username'] = username
         
@@ -272,7 +268,6 @@ class AdminCommands:
         return AWAIT_BROADCAST_MESSAGE
     
     async def receive_broadcast_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-        # Store the message content based on type
         broadcast_type = context.user_data.get('broadcast_type', 'all')
         
         if update.message.text:
@@ -298,10 +293,9 @@ class AdminCommands:
             context.user_data['broadcast_caption'] = update.message.caption or ""
             preview_text = f"**Document Preview:**\n\n{update.message.caption or '(No caption)'}"
         else:
-            await update.message.reply_text("❌ Unsupported message type. Please send text, photo, video, or document.")
+            await update.message.reply_text("❌ Unsupported message type.")
             return AWAIT_BROADCAST_MESSAGE
         
-        # Show preview based on broadcast type
         if broadcast_type == 'all':
             users = self.get_all_users()
             user_count = len(users)
@@ -310,7 +304,6 @@ class AdminCommands:
             target_username = context.user_data.get('broadcast_target_username', 'Unknown')
             preview_info = f"**Recipient:** {target_username}"
         
-        # Create confirmation keyboard
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✅ Send Broadcast", callback_data="broadcast_confirm"),
@@ -338,16 +331,13 @@ class AdminCommands:
         message_type = context.user_data.get('broadcast_message_type', 'text')
         
         if broadcast_type == 'all':
-            # Get all users
             users = self.get_all_users()
             total_users = len(users)
             successful = 0
             failed = 0
             
-            # Send initial status
             status_msg = await query.message.reply_text(f"📤 Broadcasting to {total_users} users...\n✅ Successful: 0\n❌ Failed: 0")
             
-            # Send to each user
             for user_data in users:
                 try:
                     user_id = int(user_data['user_id'])
@@ -382,7 +372,6 @@ class AdminCommands:
                     
                     successful += 1
                     
-                    # Update status every 10 sends
                     if successful % 10 == 0:
                         await status_msg.edit_text(
                             f"📤 Broadcasting to {total_users} users...\n"
@@ -391,14 +380,12 @@ class AdminCommands:
                             f"📊 Progress: {((successful + failed) / total_users * 100):.1f}%"
                         )
                         
-                    # Small delay to avoid rate limiting
                     await asyncio.sleep(0.1)
                     
                 except Exception as e:
                     failed += 1
                     logger.error(f"Failed to send broadcast to {user_data['user_id']}: {e}")
             
-            # Final status
             await status_msg.edit_text(
                 f"✅ **Broadcast Completed!**\n\n"
                 f"📊 **Statistics:**\n"
@@ -408,7 +395,6 @@ class AdminCommands:
                 f"• 📈 Success Rate: {(successful/total_users*100):.1f}%"
             )
             
-            # Log admin action
             self.log_admin_action(
                 admin_id=user.id,
                 admin_username=user.username or str(user.id),
@@ -416,7 +402,7 @@ class AdminCommands:
                 details=f"Type: {message_type} | Sent: {successful}/{total_users}"
             )
             
-        else:  # Single user broadcast
+        else:
             target_user_id = context.user_data.get('broadcast_target_user_id')
             target_username = context.user_data.get('broadcast_target_username', 'Unknown')
             
@@ -449,7 +435,6 @@ class AdminCommands:
                         parse_mode="Markdown"
                     )
                 
-                # Log admin action
                 self.log_admin_action(
                     admin_id=user.id,
                     admin_username=user.username or str(user.id),
@@ -468,9 +453,7 @@ class AdminCommands:
                     f"❌ **Failed to send message to {target_username}**\n\nError: {str(e)}"
                 )
         
-        # Clear context data
         self._clear_broadcast_context(context)
-        
         return ConversationHandler.END
     
     def _clear_broadcast_context(self, context):
@@ -489,9 +472,7 @@ class AdminCommands:
         await query.answer()
         
         await query.message.edit_text("🚫 Broadcast cancelled.")
-        
         self._clear_broadcast_context(context)
-        
         return ConversationHandler.END
     
     async def cancel_broadcast_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -499,9 +480,7 @@ class AdminCommands:
             "🚫 Broadcast cancelled.",
             reply_markup=self.get_admin_keyboard()
         )
-        
         self._clear_broadcast_context(context)
-        
         return ConversationHandler.END
     
     async def cancel_broadcast_action_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -509,12 +488,10 @@ class AdminCommands:
         await query.answer()
         
         await query.message.edit_text("🚫 Broadcast cancelled.")
-        
         self._clear_broadcast_context(context)
-        
         return ConversationHandler.END
     
-    # =============== FIXED BOT STATUS FEATURE ===============
+    # =============== BOT STATUS FEATURE ===============
     async def handle_bot_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if not self.is_multi_admin(user.id):
@@ -560,7 +537,6 @@ class AdminCommands:
             status = "🔴 DEACTIVATED"
             action_text = "deactivated"
         elif action == "bot_refresh":
-            # Refresh status
             current_status = self.get_bot_status()
             status_text = "🟢 ACTIVE" if current_status else "🔴 INACTIVE"
             
@@ -581,7 +557,6 @@ class AdminCommands:
             )
             return
         
-        # Log admin action for activate/deactivate
         if action in ["bot_activate", "bot_deactivate"]:
             self.log_admin_action(
                 admin_id=user.id,
@@ -609,7 +584,7 @@ class AdminCommands:
             reply_markup=keyboard
         )
     
-    # =============== IMPROVED CASH CONTROL FEATURE ===============
+    # =============== CASH CONTROL FEATURE ===============
     async def start_cash_control(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         user = update.effective_user
         if not self.is_multi_admin(user.id):
@@ -646,6 +621,7 @@ class AdminCommands:
                 "user_id": row_values[0] if len(row_values) > 0 else str(user_id),
                 "username": row_values[1] if len(row_values) > 1 else "N/A",
                 "coin_balance": row_values[2].strip() if len(row_values) > 2 else "0",
+                "banned": row_values[6] if len(row_values) > 6 else "FALSE",
             }
         except Exception as e:
             logger.error("Error get_user_data_from_sheet: %s", e)
@@ -684,7 +660,6 @@ class AdminCommands:
             await update.message.reply_text("❌ User not found or ID/Username is invalid. Please try again or type '🚫 Cancel'.")
             return AWAIT_CASH_CONTROL_ID
         
-        # Get current coin balance
         user_data = self.get_user_data_from_sheet(user_id_int)
         current_balance = user_data.get('coin_balance', '0')
         
@@ -737,7 +712,6 @@ class AdminCommands:
                 
             new_balance = old_balance + coin_change
             
-            # Prevent negative balance
             if new_balance < 0:
                 await update.message.reply_text(
                     f"❌ Cannot subtract {abs(coin_change)} coins. User only has {old_balance} coins.\n"
@@ -777,7 +751,6 @@ class AdminCommands:
             
             await update.message.reply_text(admin_success_msg, parse_mode="Markdown", reply_markup=keyboard)
             
-            # Log admin action
             self.log_admin_action(
                 admin_id=admin_user.id,
                 admin_username=admin_user.username or str(admin_user.id),
@@ -786,7 +759,6 @@ class AdminCommands:
                 details=f"Change: {coin_change} coins | Old: {old_balance} | New: {new_balance}"
             )
             
-            # Notify User (Only if coins were added or subtracted)
             if coin_change != 0:
                 user_notification = (
                     f"💰 **Coin Balance Update**\n\n"
@@ -803,9 +775,8 @@ class AdminCommands:
                     await update.message.reply_text(f"⚠️ Warning: Could not send notification to user ID {target_user_id}. Error: {e}", reply_markup=self.get_admin_keyboard())
         
         else:
-            await update.message.reply_text("❌ Error: Target user row could not be located in the sheet during final update.", reply_markup=self.get_admin_keyboard())
+            await update.message.reply_text("❌ Error: Target user row could not be located.", reply_markup=self.get_admin_keyboard())
         
-        # Clean up context data
         if 'target_cash_control_id' in context.user_data:
             del context.user_data['target_cash_control_id']
         if 'target_cash_control_name' in context.user_data:
@@ -843,7 +814,6 @@ class AdminCommands:
         search_term = update.message.text.strip()
         
         try:
-            # Search in user_data sheet
             users_data = self.ws_user_data.get_all_records()
             found_users = []
             
@@ -864,16 +834,18 @@ class AdminCommands:
                 )
                 return ConversationHandler.END
             
-            # Display results
             if len(found_users) == 1:
                 user = found_users[0]
                 user_info = self._format_user_details(user)
                 
-                # Add action buttons - NO CANCEL BUTTON
+                # Get current banned status for button text
+                is_banned = str(user.get('banned', 'FALSE')).upper() == 'TRUE'
+                ban_button_text = "✅ Unban" if is_banned else "❌ Ban"
+                
                 keyboard = InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("💰 Add Coins", callback_data=f"user_add_{user['user_id']}"),
-                        InlineKeyboardButton("🔨 Ban/Unban", callback_data=f"user_ban_{user['user_id']}")
+                        InlineKeyboardButton(ban_button_text, callback_data=f"user_ban_{user['user_id']}")
                     ],
                     [
                         InlineKeyboardButton("📋 Orders", callback_data=f"user_orders_{user['user_id']}"),
@@ -891,7 +863,8 @@ class AdminCommands:
             else:
                 results_text = f"🔍 Found {len(found_users)} users:\n\n"
                 for i, user in enumerate(found_users[:10], 1):
-                    results_text += f"{i}. {user.get('username', 'N/A')} (ID: `{user.get('user_id', 'N/A')}`) - {user.get('coin_balance', '0')} coins\n"
+                    banned_status = "❌" if str(user.get('banned', 'FALSE')).upper() == 'TRUE' else "✅"
+                    results_text += f"{i}. {banned_status} {user.get('username', 'N/A')} (ID: `{user.get('user_id', 'N/A')}`) - {user.get('coin_balance', '0')} coins\n"
                 
                 if len(found_users) > 10:
                     results_text += f"\n... and {len(found_users) - 10} more users."
@@ -916,7 +889,7 @@ class AdminCommands:
         return ConversationHandler.END
     
     def _format_user_details(self, user: Dict) -> str:
-        banned_status = "✅ Active" if user.get('banned', 'FALSE').upper() == 'FALSE' else "❌ Banned"
+        banned_status = "✅ Active" if str(user.get('banned', 'FALSE')).upper() == 'FALSE' else "❌ Banned"
         
         user_info = (
             f"👤 **User Details**\n\n"
@@ -949,7 +922,6 @@ class AdminCommands:
             await query.message.edit_text("You are not authorized.")
             return
         
-        # Get user ID from callback data
         parts = query.data.split("_")
         if len(parts) < 3:
             await query.message.edit_text("❌ Invalid user data.")
@@ -961,11 +933,9 @@ class AdminCommands:
             await query.message.edit_text("❌ Invalid user ID.")
             return
         
-        # Store target user info for cash control
         context.user_data['target_cash_control_id'] = target_user_id
         context.user_data['target_cash_control_name'] = f"ID:{target_user_id}"
         
-        # Get current balance
         user_data = self.get_user_data_from_sheet(target_user_id)
         current_balance = user_data.get('coin_balance', '0')
         context.user_data['current_coin_balance'] = current_balance
@@ -979,11 +949,10 @@ class AdminCommands:
             parse_mode="Markdown"
         )
         
-        # Set conversation state for cash control
         return AWAIT_CASH_CONTROL_AMOUNT
     
     async def handle_user_ban_unban(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle Ban/Unban button from user search"""
+        """Handle Ban/Unban button from user search - WORKING TOGGLE"""
         query = update.callback_query
         await query.answer()
         
@@ -1007,44 +976,85 @@ class AdminCommands:
         # Get current user data
         user_data = self.get_user_data_from_sheet(target_user_id)
         current_status = user_data.get('banned', 'FALSE')
-        is_banned = current_status.upper() == 'TRUE'
+        is_banned = str(current_status).upper() == 'TRUE'
         
         # Toggle ban status
         new_status = not is_banned
+        new_status_text = "TRUE" if new_status else "FALSE"
         
-        # Update in sheet
+        # Find the row
         row = self.find_user_row(target_user_id)
-        if row:
-            self.ws_user_data.update_cell(row, 7, "TRUE" if new_status else "FALSE")
-            
-            # Log admin action
-            self.log_admin_action(
-                admin_id=user.id,
-                admin_username=user.username or str(user.id),
-                action="BAN_TOGGLE" if new_status else "UNBAN_TOGGLE",
-                target_user=str(target_user_id),
-                details=f"Status changed from {current_status} to {'BANNED' if new_status else 'ACTIVE'}"
-            )
-            
-            status_text = "❌ BANNED" if new_status else "✅ UNBANNED"
-            await query.message.edit_text(
-                f"✅ **User Status Updated**\n\n"
-                f"User ID: `{target_user_id}`\n"
-                f"Username: {user_data.get('username', 'N/A')}\n"
-                f"Status: {status_text}\n\n"
-                f"Previous status: {'BANNED' if is_banned else 'ACTIVE'}",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
-                ])
-            )
-        else:
-            await query.message.edit_text(
-                "❌ User not found in database.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
-                ])
-            )
+        if not row:
+            await query.message.edit_text("❌ User not found in database.")
+            return
+        
+        # Update in sheet - Column 7 is banned status
+        try:
+            self.ws_user_data.update_cell(row, 7, new_status_text)
+        except Exception as e:
+            logger.error(f"Error updating banned status: {e}")
+            # Try column 8 if column 7 fails
+            try:
+                self.ws_user_data.update_cell(row, 8, new_status_text)
+            except:
+                await query.message.edit_text("❌ Error updating user status.")
+                return
+        
+        # Log admin action
+        action = "BAN_USER" if new_status else "UNBAN_USER"
+        self.log_admin_action(
+            admin_id=user.id,
+            admin_username=user.username or str(user.id),
+            action=action,
+            target_user=str(target_user_id),
+            details=f"Changed from {'BANNED' if is_banned else 'ACTIVE'} to {'BANNED' if new_status else 'ACTIVE'}"
+        )
+        
+        # Prepare response
+        status_emoji = "❌" if new_status else "✅"
+        status_text = "BANNED" if new_status else "UNBANNED"
+        action_text = "banned" if new_status else "unbanned"
+        
+        # Update button text
+        new_ban_button_text = "✅ Unban" if new_status else "❌ Ban"
+        
+        # Create updated user info
+        updated_user_data = {**user_data, 'banned': new_status_text}
+        user_info = self._format_user_details(updated_user_data)
+        
+        # Create keyboard with updated button
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("💰 Add Coins", callback_data=f"user_add_{target_user_id}"),
+                InlineKeyboardButton(new_ban_button_text, callback_data=f"user_ban_{target_user_id}")
+            ],
+            [
+                InlineKeyboardButton("📋 Orders", callback_data=f"user_orders_{target_user_id}"),
+                InlineKeyboardButton("📝 Edit", callback_data=f"user_edit_{target_user_id}")
+            ],
+            [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+        ])
+        
+        # Update the message
+        await query.message.edit_text(
+            f"{status_emoji} **User {action_text.upper()} successfully!**\n\n"
+            f"{user_info}",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        
+        # Send notification to user if unbanned
+        if not new_status:  # If user was unbanned
+            try:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text="🎉 **Good news! Your account has been unbanned.**\n\n"
+                         "You can now access all bot features again.\n"
+                         "Welcome back!",
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Could not notify user about unban: {e}")
     
     async def handle_user_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle Orders button from user search"""
@@ -1056,7 +1066,6 @@ class AdminCommands:
             await query.message.edit_text("You are not authorized.")
             return
         
-        # Get user ID from callback data
         parts = query.data.split("_")
         if len(parts) < 3:
             await query.message.edit_text("❌ Invalid user data.")
@@ -1132,7 +1141,6 @@ class AdminCommands:
             await query.message.edit_text("You are not authorized.")
             return
         
-        # Get user ID from callback data
         parts = query.data.split("_")
         if len(parts) < 3:
             await query.message.edit_text("❌ Invalid user data.")
@@ -1197,7 +1205,6 @@ class AdminCommands:
             await query.message.edit_text("You are not authorized.")
             return
         
-        # Get user ID from callback data
         parts = query.data.split("_")
         if len(parts) < 3:
             await query.message.edit_text("❌ Invalid user data.")
@@ -1213,7 +1220,6 @@ class AdminCommands:
         context.user_data['target_cash_control_id'] = target_user_id
         context.user_data['target_cash_control_name'] = f"ID:{target_user_id}"
         
-        # Get current balance
         user_data = self.get_user_data_from_sheet(target_user_id)
         current_balance = user_data.get('coin_balance', '0')
         context.user_data['current_coin_balance'] = current_balance
@@ -1259,7 +1265,7 @@ class AdminCommands:
             ])
         )
     
-    # =============== FIXED SYSTEM HEALTH FEATURE ===============
+    # =============== SYSTEM HEALTH FEATURE ===============
     async def handle_system_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         if not self.is_multi_admin(user.id):
@@ -1267,20 +1273,11 @@ class AdminCommands:
             return
         
         try:
-            # Check Google Sheets connection
             sheets_status = "✅ Connected" if self.ws_user_data else "❌ Disconnected"
-            
-            # Check bot status
             bot_status = "🟢 Active" if self.get_bot_status() else "🔴 Inactive"
-            
-            # Get user count
-            users = self.get_all_users()
-            user_count = len(users)
-            
-            # Get pending orders
+            user_count = len(self.get_all_users())
             pending_orders = len(self.get_pending_orders())
             
-            # Get recent errors from admin logs
             recent_errors = 0
             try:
                 logs = self.ws_admin_logs.get_all_records()
@@ -1298,7 +1295,6 @@ class AdminCommands:
             except:
                 recent_errors = "N/A"
             
-            # Format health report
             health_text = (
                 f"📈 **SYSTEM HEALTH REPORT**\n\n"
                 f"🤖 **Bot Status:** {bot_status}\n"
@@ -1312,7 +1308,6 @@ class AdminCommands:
                 f"🔄 **Last Refresh:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             )
             
-            # Add health indicators
             health_score = 100
             issues = []
             
@@ -1447,16 +1442,13 @@ class AdminCommands:
                 await query.message.edit_text("❌ Invalid export type.")
                 return ConversationHandler.END
             
-            # Create CSV in memory
             output = io.StringIO()
             writer = csv.DictWriter(output, fieldnames=fieldnames)
             writer.writeheader()
             
-            # Write data
             for row in data:
                 writer.writerow(row)
             
-            # Send file
             await context.bot.send_document(
                 chat_id=user.id,
                 document=io.BytesIO(output.getvalue().encode()),
@@ -1464,7 +1456,6 @@ class AdminCommands:
                 caption=f"✅ {export_type.title()} export completed.\n\n📅 Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
             
-            # Log admin action
             self.log_admin_action(
                 admin_id=user.id,
                 admin_username=user.username or str(user.id),
@@ -1483,18 +1474,6 @@ class AdminCommands:
             await query.message.edit_text(f"❌ Error exporting {export_type}: {str(e)}")
         
         return ConversationHandler.END
-    
-    def _is_recent(self, date_str: str, days: int) -> bool:
-        """Check if a date string is within the last N days"""
-        if not date_str:
-            return False
-        
-        try:
-            date = datetime.datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
-            days_ago = datetime.datetime.now() - datetime.timedelta(days=days)
-            return date > days_ago
-        except:
-            return False
     
     async def cancel_data_export(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(
@@ -1516,4 +1495,4 @@ class AdminCommands:
             ],
             resize_keyboard=True,
             one_time_keyboard=False
-        )
+            )
