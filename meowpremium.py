@@ -422,6 +422,26 @@ def update_config_value(key: str, value: str) -> bool:
         return False
 
 
+# ------------ Bot Status Management ----------------
+def set_bot_status(active: bool) -> bool:
+    """Set bot active/inactive status"""
+    global BOT_ACTIVE
+    BOT_ACTIVE = active
+    
+    # Also save to config sheet
+    status_text = "ACTIVE" if active else "INACTIVE"
+    return update_config_value("bot_status", status_text)
+
+
+def get_bot_status() -> bool:
+    """Get bot status from config sheet"""
+    global BOT_ACTIVE
+    config = get_config_data()
+    status = config.get("bot_status", "ACTIVE")
+    BOT_ACTIVE = status.upper() == "ACTIVE"
+    return BOT_ACTIVE
+
+
 # ------------ Keyboards ----------------
 def get_payment_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -557,27 +577,21 @@ def parse_amount_from_text(text: str) -> Optional[int]:
     return None
 
 
-# ------------ Bot Status Management ----------------
-def set_bot_status(active: bool) -> bool:
-    """Set bot active/inactive status"""
-    global BOT_ACTIVE
-    BOT_ACTIVE = active
+# ------------ HANDLERS FOR ADMIN BUTTONS ------------
+async def handle_admin_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin back button"""
+    user = update.effective_user
+    if not is_multi_admin(user.id):
+        await update.message.reply_text("You are not authorized.")
+        return
     
-    # Also save to config sheet
-    status_text = "ACTIVE" if active else "INACTIVE"
-    return update_config_value("bot_status", status_text)
+    await update.message.reply_text(
+        "🏠 Returning to admin menu...",
+        reply_markup=ADMIN_REPLY_KEYBOARD
+    )
 
 
-def get_bot_status() -> bool:
-    """Get bot status from config sheet"""
-    global BOT_ACTIVE
-    config = get_config_data()
-    status = config.get("bot_status", "ACTIVE")
-    BOT_ACTIVE = status.upper() == "ACTIVE"
-    return BOT_ACTIVE
-
-
-# ------------ Handlers ----------------
+# =============== MAIN HANDLERS ===============
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     register_user_if_not_exists(user.id, user.full_name)
@@ -589,7 +603,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = get_config_data()
     is_admin = is_multi_admin(user.id)
 
-    # Admin ဆိုရင် bot status ကို စစ်မနေတော့ဘူး
     if not is_admin and not get_bot_status():
         await update.message.reply_text(
             "⏸️ Bot is currently closed for maintenance. Please try again later."
@@ -611,7 +624,6 @@ async def show_product_inline_menu(update: Update, context: ContextTypes.DEFAULT
     config = get_config_data()
     is_admin = is_multi_admin(user.id)
     
-    # Admin မဟုတ်ရင် bot status စစ်ပါ
     if not is_admin and not get_bot_status():
         await update.message.reply_text("⏸️ Bot is currently closed for maintenance.")
         return
@@ -629,7 +641,6 @@ async def handle_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = get_config_data()
     is_admin = is_multi_admin(user.id)
     
-    # Admin မဟုတ်ရင် bot status စစ်ပါ
     if not is_admin and not get_bot_status():
         await update.message.reply_text("⏸️ Bot is currently closed for maintenance.")
         return
@@ -658,7 +669,6 @@ async def handle_help_center(update: Update, context: ContextTypes.DEFAULT_TYPE)
     config = get_config_data()
     is_admin = is_multi_admin(user.id)
     
-    # Admin မဟုတ်ရင် bot status စစ်ပါ
     if not is_admin and not get_bot_status():
         await update.message.reply_text("⏸️ Bot is currently closed for maintenance.")
         return
@@ -683,7 +693,6 @@ async def handle_payment_method(update: Update, context: ContextTypes.DEFAULT_TY
     config = get_config_data()
     is_admin = is_multi_admin(user.id)
     
-    # Admin မဟုတ်ရင် bot status စစ်ပါ
     if not is_admin and not get_bot_status():
         await update.message.reply_text("⏸️ Bot is currently closed for maintenance.")
         return ConversationHandler.END
@@ -989,7 +998,6 @@ async def start_product_purchase(update: Update, context: ContextTypes.DEFAULT_T
     config = get_config_data()
     is_admin = is_multi_admin(user.id)
     
-    # Admin မဟုတ်ရင် bot status စစ်ပါ
     if not is_admin and not get_bot_status():
         await query.message.reply_text("⏸️ Bot is currently closed for maintenance.")
         return ConversationHandler.END
@@ -1409,6 +1417,9 @@ def main():
     application.add_handler(MessageHandler(filters.Text("👤 User Info"), handle_user_info))
     application.add_handler(MessageHandler(filters.Text("❓ Help Center"), handle_help_center))
     application.add_handler(MessageHandler(filters.Text("✨ Premium & Star"), show_product_inline_menu))
+    
+    # Admin buttons handlers
+    application.add_handler(MessageHandler(filters.Text("🏠 Back to Admin Menu"), handle_admin_back))
     
     # Inline callbacks
     application.add_handler(CallbackQueryHandler(start_product_purchase, pattern=r"^product_"))
