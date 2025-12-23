@@ -57,7 +57,7 @@ class AdminCommands:
     def register_handlers(self, application):
         """Register all admin command handlers"""
         
-        # Broadcast Conversation Handler (Updated with media support)
+        # Broadcast Conversation Handler
         broadcast_handler = ConversationHandler(
             entry_points=[MessageHandler(filters.Text("👾 Broadcast"), self.start_broadcast_type)],
             states={
@@ -65,7 +65,7 @@ class AdminCommands:
                     CallbackQueryHandler(self.handle_broadcast_type, pattern=r"^broadcast_type_")
                 ],
                 AWAIT_BROADCAST_TARGET_USER: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("🚫 Cancel"), self.handle_broadcast_target_user)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_broadcast_target_user)
                 ],
                 AWAIT_BROADCAST_MESSAGE: [
                     MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL, self.receive_broadcast_message)
@@ -92,10 +92,11 @@ class AdminCommands:
             entry_points=[MessageHandler(filters.Text("📝 Cash Control"), self.start_cash_control)],
             states={
                 AWAIT_CASH_CONTROL_ID: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("🚫 Cancel"), self.cash_control_get_id)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.cash_control_get_id)
                 ],
                 AWAIT_CASH_CONTROL_AMOUNT: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("🚫 Cancel"), self.cash_control_apply_amount)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.cash_control_apply_amount),
+                    CallbackQueryHandler(self.handle_user_add_coins, pattern=r"^user_add_")
                 ]
             },
             fallbacks=[MessageHandler(filters.Text("🚫 Cancel"), self.cash_control_cancel)],
@@ -108,7 +109,7 @@ class AdminCommands:
             entry_points=[MessageHandler(filters.Text("👤 User Search"), self.start_user_search)],
             states={
                 AWAIT_USER_SEARCH: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Text("🚫 Cancel"), self.process_user_search)
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.process_user_search)
                 ]
             },
             fallbacks=[MessageHandler(filters.Text("🚫 Cancel"), self.cancel_user_search)],
@@ -132,6 +133,18 @@ class AdminCommands:
             allow_reentry=True
         )
         application.add_handler(data_export_handler)
+        
+        # =============== USER SEARCH ACTIONS HANDLERS ===============
+        application.add_handler(CallbackQueryHandler(self.handle_user_add_coins, pattern=r"^user_add_"))
+        application.add_handler(CallbackQueryHandler(self.handle_user_ban_unban, pattern=r"^user_ban_"))
+        application.add_handler(CallbackQueryHandler(self.handle_user_orders, pattern=r"^user_orders_"))
+        application.add_handler(CallbackQueryHandler(self.handle_user_edit, pattern=r"^user_edit_"))
+        
+        # Edit actions handlers
+        application.add_handler(CallbackQueryHandler(self.handle_edit_username, pattern=r"^edit_username_"))
+        application.add_handler(CallbackQueryHandler(self.handle_edit_balance, pattern=r"^edit_balance_"))
+        application.add_handler(CallbackQueryHandler(self.handle_edit_lastactive, pattern=r"^edit_lastactive_"))
+        application.add_handler(CallbackQueryHandler(self.handle_edit_totalpurchase, pattern=r"^edit_totalpurchase_"))
         
         # Admin back button handler
         application.add_handler(CallbackQueryHandler(self.admin_back_callback, pattern=r"^admin_back$"))
@@ -297,7 +310,7 @@ class AdminCommands:
             target_username = context.user_data.get('broadcast_target_username', 'Unknown')
             preview_info = f"**Recipient:** {target_username}"
         
-        # Create confirmation keyboard with beautiful buttons
+        # Create confirmation keyboard
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("✅ Send Broadcast", callback_data="broadcast_confirm"),
@@ -547,7 +560,7 @@ class AdminCommands:
             status = "🔴 DEACTIVATED"
             action_text = "deactivated"
         elif action == "bot_refresh":
-            # Refresh လုပ်တဲ့အခါ message ကို ဖျက်ပြီး အသစ်ပြန်ပို့မယ်
+            # Refresh status
             current_status = self.get_bot_status()
             status_text = "🟢 ACTIVE" if current_status else "🔴 INACTIVE"
             
@@ -559,7 +572,6 @@ class AdminCommands:
                 [InlineKeyboardButton("🔄 Refresh Status", callback_data="bot_refresh")]
             ])
             
-            # Message တစ်ခုလုံးကို အသစ်ပြန်ပို့မယ်
             await query.message.delete()
             await context.bot.send_message(
                 chat_id=user.id,
@@ -578,7 +590,6 @@ class AdminCommands:
                 details=f"Bot {action_text}"
             )
         
-        # Activate/Deactivate လုပ်တဲ့အခါမှာလည်း message အသစ်ပို့မယ်
         current_status = self.get_bot_status()
         status_text = "🟢 ACTIVE" if current_status else "🔴 INACTIVE"
         
@@ -590,7 +601,6 @@ class AdminCommands:
             [InlineKeyboardButton("🔄 Refresh Status", callback_data="bot_refresh")]
         ])
         
-        # Message အသစ်ပို့မယ်
         await query.message.delete()
         await context.bot.send_message(
             chat_id=user.id,
@@ -706,9 +716,9 @@ class AdminCommands:
             await update.message.reply_text("❌ Error: Target user ID lost. Please restart Cash Control.", reply_markup=self.get_admin_keyboard())
             return ConversationHandler.END
         
-        match = re.match(r"([+\-]\d+)", amount_text)
+        match = re.match(r"([+\-]?\d+)", amount_text)
         if not match:
-            await update.message.reply_text("❌ Invalid format. Please use '+[number]' or '-[number]' (e.g., `+5000` or `-100`).")
+            await update.message.reply_text("❌ Invalid format. Please use '+[number]', '-[number]' or just '[number]' (e.g., `+5000`, `-100`, or `10000`).")
             return AWAIT_CASH_CONTROL_AMOUNT
         
         try:
@@ -761,7 +771,6 @@ class AdminCommands:
                 f"**Processed by:** {admin_processed_by}"
             )
             
-            # Create beautiful back button
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
             ])
@@ -860,7 +869,7 @@ class AdminCommands:
                 user = found_users[0]
                 user_info = self._format_user_details(user)
                 
-                # Add action buttons
+                # Add action buttons - NO CANCEL BUTTON
                 keyboard = InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton("💰 Add Coins", callback_data=f"user_add_{user['user_id']}"),
@@ -928,6 +937,327 @@ class AdminCommands:
             reply_markup=self.get_admin_keyboard()
         )
         return ConversationHandler.END
+    
+    # =============== USER SEARCH ACTIONS HANDLERS ===============
+    async def handle_user_add_coins(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Add Coins button from user search"""
+        query = update.callback_query
+        await query.answer()
+        
+        user = query.from_user
+        if not self.is_multi_admin(user.id):
+            await query.message.edit_text("You are not authorized.")
+            return
+        
+        # Get user ID from callback data
+        parts = query.data.split("_")
+        if len(parts) < 3:
+            await query.message.edit_text("❌ Invalid user data.")
+            return
+        
+        try:
+            target_user_id = int(parts[2])
+        except ValueError:
+            await query.message.edit_text("❌ Invalid user ID.")
+            return
+        
+        # Store target user info for cash control
+        context.user_data['target_cash_control_id'] = target_user_id
+        context.user_data['target_cash_control_name'] = f"ID:{target_user_id}"
+        
+        # Get current balance
+        user_data = self.get_user_data_from_sheet(target_user_id)
+        current_balance = user_data.get('coin_balance', '0')
+        context.user_data['current_coin_balance'] = current_balance
+        
+        await query.message.edit_text(
+            f"💰 **ADD COINS TO USER**\n\n"
+            f"User ID: `{target_user_id}`\n"
+            f"Current Balance: {current_balance} Coins\n\n"
+            "Please enter the amount of coins to add (use positive number):\n"
+            "Example: `+5000` or just `5000`",
+            parse_mode="Markdown"
+        )
+        
+        # Set conversation state for cash control
+        return AWAIT_CASH_CONTROL_AMOUNT
+    
+    async def handle_user_ban_unban(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Ban/Unban button from user search"""
+        query = update.callback_query
+        await query.answer()
+        
+        user = query.from_user
+        if not self.is_multi_admin(user.id):
+            await query.message.edit_text("You are not authorized.")
+            return
+        
+        # Get user ID from callback data
+        parts = query.data.split("_")
+        if len(parts) < 3:
+            await query.message.edit_text("❌ Invalid user data.")
+            return
+        
+        try:
+            target_user_id = int(parts[2])
+        except ValueError:
+            await query.message.edit_text("❌ Invalid user ID.")
+            return
+        
+        # Get current user data
+        user_data = self.get_user_data_from_sheet(target_user_id)
+        current_status = user_data.get('banned', 'FALSE')
+        is_banned = current_status.upper() == 'TRUE'
+        
+        # Toggle ban status
+        new_status = not is_banned
+        
+        # Update in sheet
+        row = self.find_user_row(target_user_id)
+        if row:
+            self.ws_user_data.update_cell(row, 7, "TRUE" if new_status else "FALSE")
+            
+            # Log admin action
+            self.log_admin_action(
+                admin_id=user.id,
+                admin_username=user.username or str(user.id),
+                action="BAN_TOGGLE" if new_status else "UNBAN_TOGGLE",
+                target_user=str(target_user_id),
+                details=f"Status changed from {current_status} to {'BANNED' if new_status else 'ACTIVE'}"
+            )
+            
+            status_text = "❌ BANNED" if new_status else "✅ UNBANNED"
+            await query.message.edit_text(
+                f"✅ **User Status Updated**\n\n"
+                f"User ID: `{target_user_id}`\n"
+                f"Username: {user_data.get('username', 'N/A')}\n"
+                f"Status: {status_text}\n\n"
+                f"Previous status: {'BANNED' if is_banned else 'ACTIVE'}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+                ])
+            )
+        else:
+            await query.message.edit_text(
+                "❌ User not found in database.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+                ])
+            )
+    
+    async def handle_user_orders(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Orders button from user search"""
+        query = update.callback_query
+        await query.answer()
+        
+        user = query.from_user
+        if not self.is_multi_admin(user.id):
+            await query.message.edit_text("You are not authorized.")
+            return
+        
+        # Get user ID from callback data
+        parts = query.data.split("_")
+        if len(parts) < 3:
+            await query.message.edit_text("❌ Invalid user data.")
+            return
+        
+        try:
+            target_user_id = int(parts[2])
+        except ValueError:
+            await query.message.edit_text("❌ Invalid user ID.")
+            return
+        
+        # Get user orders
+        try:
+            all_orders = self.ws_orders.get_all_records()
+            user_orders = []
+            for order in all_orders:
+                if str(order.get('user_id', '')) == str(target_user_id):
+                    user_orders.append(order)
+            
+            if not user_orders:
+                await query.message.edit_text(
+                    f"📊 **Orders History**\n\n"
+                    f"User ID: `{target_user_id}`\n"
+                    f"No orders found.",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+                    ])
+                )
+                return
+            
+            # Format orders list
+            orders_text = f"📊 **Orders History**\n\n"
+            orders_text += f"User ID: `{target_user_id}`\n"
+            orders_text += f"Total Orders: {len(user_orders)}\n\n"
+            
+            for i, order in enumerate(user_orders[:10], 1):
+                orders_text += f"**Order {i}:**\n"
+                orders_text += f"• ID: `{order.get('order_id', 'N/A')}`\n"
+                orders_text += f"• Product: {order.get('product_key', 'N/A')}\n"
+                orders_text += f"• Amount: {order.get('price_mmk', '0')} MMK\n"
+                orders_text += f"• Status: {order.get('status', 'N/A')}\n"
+                orders_text += f"• Date: {order.get('timestamp', 'N/A')}\n"
+                orders_text += "---\n"
+            
+            if len(user_orders) > 10:
+                orders_text += f"\n... and {len(user_orders) - 10} more orders."
+            
+            await query.message.edit_text(
+                orders_text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+                ])
+            )
+            
+        except Exception as e:
+            logger.error(f"Error getting user orders: {e}")
+            await query.message.edit_text(
+                f"❌ Error retrieving orders: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+                ])
+            )
+    
+    async def handle_user_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Edit button from user search"""
+        query = update.callback_query
+        await query.answer()
+        
+        user = query.from_user
+        if not self.is_multi_admin(user.id):
+            await query.message.edit_text("You are not authorized.")
+            return
+        
+        # Get user ID from callback data
+        parts = query.data.split("_")
+        if len(parts) < 3:
+            await query.message.edit_text("❌ Invalid user data.")
+            return
+        
+        try:
+            target_user_id = int(parts[2])
+        except ValueError:
+            await query.message.edit_text("❌ Invalid user ID.")
+            return
+        
+        # Get current user data
+        user_data = self.get_user_data_from_sheet(target_user_id)
+        
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✏️ Edit Username", callback_data=f"edit_username_{target_user_id}"),
+                InlineKeyboardButton("💰 Edit Balance", callback_data=f"edit_balance_{target_user_id}")
+            ],
+            [
+                InlineKeyboardButton("📅 Edit Last Active", callback_data=f"edit_lastactive_{target_user_id}"),
+                InlineKeyboardButton("💵 Edit Total Purchase", callback_data=f"edit_totalpurchase_{target_user_id}")
+            ],
+            [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+        ])
+        
+        await query.message.edit_text(
+            f"✏️ **EDIT USER DATA**\n\n"
+            f"User ID: `{target_user_id}`\n"
+            f"Username: {user_data.get('username', 'N/A')}\n"
+            f"Coin Balance: {user_data.get('coin_balance', '0')}\n"
+            f"Last Active: {user_data.get('last_active', 'N/A')}\n"
+            f"Total Purchase: {user_data.get('total_purchase', '0')} MMK\n\n"
+            f"Select what you want to edit:",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+    
+    # =============== EDIT USER DATA FUNCTIONS ===============
+    async def handle_edit_username(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Edit Username"""
+        query = update.callback_query
+        await query.answer()
+        
+        await query.message.edit_text(
+            "✏️ **Edit Username**\n\n"
+            "This feature is under development.\n"
+            "Please use the Google Sheet directly for now.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+            ])
+        )
+    
+    async def handle_edit_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Edit Balance - redirect to cash control"""
+        query = update.callback_query
+        await query.answer()
+        
+        user = query.from_user
+        if not self.is_multi_admin(user.id):
+            await query.message.edit_text("You are not authorized.")
+            return
+        
+        # Get user ID from callback data
+        parts = query.data.split("_")
+        if len(parts) < 3:
+            await query.message.edit_text("❌ Invalid user data.")
+            return
+        
+        try:
+            target_user_id = int(parts[2])
+        except ValueError:
+            await query.message.edit_text("❌ Invalid user ID.")
+            return
+        
+        # Redirect to cash control with this user
+        context.user_data['target_cash_control_id'] = target_user_id
+        context.user_data['target_cash_control_name'] = f"ID:{target_user_id}"
+        
+        # Get current balance
+        user_data = self.get_user_data_from_sheet(target_user_id)
+        current_balance = user_data.get('coin_balance', '0')
+        context.user_data['current_coin_balance'] = current_balance
+        
+        await query.message.edit_text(
+            f"💰 **EDIT COIN BALANCE**\n\n"
+            f"User ID: `{target_user_id}`\n"
+            f"Current Balance: {current_balance} Coins\n\n"
+            "Please enter the new amount (use + for add, - for subtract):\n"
+            "Examples: `+5000`, `-100`, or `10000` for exact amount",
+            parse_mode="Markdown"
+        )
+        
+        return AWAIT_CASH_CONTROL_AMOUNT
+    
+    async def handle_edit_lastactive(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Edit Last Active"""
+        query = update.callback_query
+        await query.answer()
+        
+        await query.message.edit_text(
+            "✏️ **Edit Last Active**\n\n"
+            "This feature is under development.\n"
+            "Last active time updates automatically when user uses the bot.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+            ])
+        )
+    
+    async def handle_edit_totalpurchase(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle Edit Total Purchase"""
+        query = update.callback_query
+        await query.answer()
+        
+        await query.message.edit_text(
+            "✏️ **Edit Total Purchase**\n\n"
+            "This feature is under development.\n"
+            "Total purchase updates automatically when user makes orders.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 Back to Admin Menu", callback_data="admin_back")]
+            ])
+        )
     
     # =============== FIXED SYSTEM HEALTH FEATURE ===============
     async def handle_system_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1038,20 +1368,17 @@ class AdminCommands:
         await query.answer()
         
         if query.data == "health_refresh":
-            # Message ကို ဖျက်ပြီး အသစ်ပြန်ပို့မယ်
             try:
                 await query.message.delete()
             except:
                 pass
             
-            # Create a new Update object with the message
             new_update = Update(
                 update_id=update.update_id,
                 message=query.message
             )
             await self.handle_system_health(new_update, context)
         elif query.data == "admin_back":
-            # Back button အတွက် message ကို ဖျက်ပြီး admin menu ပြန်ပြမယ်
             try:
                 await query.message.delete()
             except:
@@ -1189,4 +1516,4 @@ class AdminCommands:
             ],
             resize_keyboard=True,
             one_time_keyboard=False
-    )
+        )
